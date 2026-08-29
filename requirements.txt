@@ -1,0 +1,44 @@
+﻿# ============================================================
+# Adaptive ML Experiment Agent - Python Dependencies
+# Python 3.13+ compatible
+# ============================================================
+
+# Web framework
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+
+# Database
+sqlalchemy==2.0.36
+psycopg2-binary==2.9.10
+
+# Data / ML
+scipy==1.14.1
+numpy==2.1.2
+pandas==2.2.3
+
+# PyTorch - CUDA 12.8 build
+# The extra index below makes `pip install -r requirements.txt` work out of the box.
+# For a CPU-only build, replace cu128 with cpu in the URL below.
+--extra-index-url https://download.pytorch.org/whl/cu128
+torch==2.7.0
+torchvision==0.22.0
+torchmetrics==1.4.1
+
+# Validation / serialization
+pydantic==2.9.2
+
+# LLM - Ollama accessed via HTTP API (no Groq SDK)
+httpx==0.27.2
+
+# Orchestration
+langgraph==0.2.42
+
+# Retry logic
+tenacity==9.0.0
+
+# Environment / config
+python-dotenv==1.0.1
+
+# Testing
+pytest==8.3.3
+pytest-asyncio==0.24.0
