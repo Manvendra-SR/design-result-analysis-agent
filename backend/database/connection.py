@@ -34,7 +34,7 @@ from sqlalchemy.exc import OperationalError
 from tenacity import (
     RetryError,
     retry,
-    retry_if_exception_type,
+    retry_if_exception_type, 
     stop_after_attempt,
     wait_exponential,
     before_sleep_log,

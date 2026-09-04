@@ -42,3 +42,4 @@ frontend/.env.local
 
 # Others
 .kiro/
+docs/
