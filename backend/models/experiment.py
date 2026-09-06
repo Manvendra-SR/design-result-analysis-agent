@@ -12,6 +12,11 @@ ExperimentResult
     Represents a *completed* experiment (status in success|failed|anomalous).
     Returned by Experiment_Runner, stored and retrieved by StateManager.
 
+ExperimentPlan
+    A batch of configurations plus a natural-language rationale, produced by
+    the Phase 4 Experiment_Planner_Agent. The planner's analog of
+    ``Recommendation`` (see ``backend/models/recommendation.py``).
+
 Notes on JSONB round-trip
 --------------------------
 ``ExperimentConfiguration`` is serialised to a plain dict via
@@ -33,6 +38,7 @@ Revision" entry for the full rationale.
 
 Requirements
 ------------
+2.1  Experiment_Planner_Agent generates Experiment_Configurations from a question
 2.4  Experiment_Planner_Agent specifies dataset/model/hyperparameters/seed explicitly
 3.1  Experiment_Runner executes configurations against a resolved Dataset
 3.5  Experiment_Runner returns metrics keyed by task_type
@@ -43,7 +49,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Dict, Literal, Optional
+from typing import Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -232,3 +238,82 @@ class ExperimentResult(BaseModel):
             }
         },
     )
+
+
+# ---------------------------------------------------------------------------
+# ExperimentPlan
+# ---------------------------------------------------------------------------
+class ExperimentPlan(BaseModel):
+    """Initial experiment plan produced by the Phase 4 Experiment_Planner_Agent.
+
+    The planner's analog of ``Recommendation`` (Phase 4 Recommender_Agent):
+    a batch of configurations to execute plus a natural-language rationale
+    for the experimental design.
+
+    Not persisted as a unit - the Phase 5 LangGraph planning node stores the
+    individual ``experiments`` as rows in the ``experiments`` table and
+    discards the wrapper. ``explanation`` is LLM-generated and is labelled
+    "Interpretation" in the UI (Requirement 12.5).
+
+    ``total_count`` is kept in sync with ``len(experiments)`` by a validator,
+    so callers may omit it.
+
+    Requirements covered: 2.1, 2.2, 2.4, 2.7
+    """
+
+    experiments: List[ExperimentConfiguration] = Field(
+        description="Configurations to execute, varying one factor at a time"
+    )
+    explanation: str = Field(
+        description="LLM rationale for the experimental design (labelled 'Interpretation' in UI)"
+    )
+    total_count: int = Field(
+        default=0,
+        description="Number of configurations in the plan; synced to len(experiments)",
+    )
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "experiments": [
+                    {
+                        "dataset_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+                        "model_type": "mlp",
+                        "hyperparameters": {
+                            "dropout": 0.0,
+                            "learning_rate": 0.001,
+                            "batch_size": 32,
+                            "hidden_size": 64,
+                            "epochs": 20,
+                        },
+                        "preprocessing": {"normalize": False},
+                        "random_seed": 42,
+                    },
+                    {
+                        "dataset_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+                        "model_type": "mlp",
+                        "hyperparameters": {
+                            "dropout": 0.2,
+                            "learning_rate": 0.001,
+                            "batch_size": 32,
+                            "hidden_size": 64,
+                            "epochs": 20,
+                        },
+                        "preprocessing": {"normalize": False},
+                        "random_seed": 42,
+                    },
+                ],
+                "explanation": (
+                    "Varying dropout (0.0 vs 0.2) with 3 seeds each, holding "
+                    "all other hyperparameters fixed, to isolate its effect "
+                    "on validation accuracy."
+                ),
+                "total_count": 2,
+            }
+        }
+    )
+
+    @model_validator(mode="after")
+    def _sync_total_count(self) -> "ExperimentPlan":
+        self.total_count = len(self.experiments)
+        return self
