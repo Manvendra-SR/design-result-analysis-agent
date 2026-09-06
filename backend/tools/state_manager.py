@@ -1,7 +1,8 @@
-﻿"""
+"""
 backend/tools/state_manager.py
 ================================
-StateManager: PostgreSQL interface for all experiment and session persistence.
+StateManager: PostgreSQL interface for all dataset, experiment, and session
+persistence.
 
 This is the single class through which all database reads and writes are
 performed.  No other module should import from ``backend.database.models``
@@ -9,7 +10,8 @@ directly — they must go through StateManager.
 
 Architecture
 ------------
-- Uses SQLAlchemy ORM (``SessionModel``, ``ExperimentModel``, ``AnomalyModel``)
+- Uses SQLAlchemy ORM (``DatasetModel``, ``SessionModel``, ``ExperimentModel``,
+  ``AnomalyModel``)
 - Pydantic models are the external-facing types; ORM models are internal
 - All public methods carry a tenacity ``@retry`` decorator (max 3 attempts,
   exponential backoff) that retries on ``OperationalError`` (connection blips)
@@ -24,40 +26,50 @@ success, and rolls back automatically on any exception.
 
 JSONB round-trip
 ----------------
-PostgreSQL stores ``ExperimentConfiguration`` as JSONB in ``experiments.config``.
+PostgreSQL stores ``ExperimentConfiguration`` and ``DatasetProfile`` as
+JSONB (in ``experiments.config`` and ``datasets.profile`` respectively).
 Round-trip path::
 
-    ExperimentConfiguration
+    ExperimentConfiguration / DatasetProfile
       -> model_dump()              (Python dict)
       -> stored by SQLAlchemy      (JSONB column)
       -> returned from PostgreSQL  (Python dict)
-      -> ExperimentConfiguration.model_validate(dict)
+      -> Model.model_validate(dict)
 
 This is exercised by the explicit round-trip tests in
 ``tests/unit/test_state_manager.py``.
 
+Dataset-first architecture revision
+-------------------------------------
+``create_session`` now requires ``dataset_id`` — every session is scoped to
+exactly one dataset (see ``backend/models/dataset.py``). ``create_dataset``/
+``get_dataset``/``list_datasets`` were added alongside the pre-existing
+session/experiment/anomaly methods; the underlying CSV file itself is never
+stored here — only the ``DatasetProfile`` metadata (the file lives on disk,
+written by ``backend/tools/dataset/ingestion.py``).
+
 Requirements
 ------------
-3.1  State_Manager persists experiment configurations and results
-3.2  State_Manager assigns unique identifiers
-3.3  State_Manager records timestamp, config JSON, metrics, status, session FK
-3.4  State_Manager supports querying by session_id and status
-3.5  State_Manager returns experiments ordered by timestamp
-3.7  State_Manager supports atomic transactions
-3.8  State_Manager retries up to 3 times with exponential backoff
-4.5  State_Manager updates experiment status to 'anomalous'
-7.1  State_Manager creates sessions with unique identifiers
-7.4  State_Manager persists research question, experiment count, cycle count
-7.6  State_Manager lists sessions with summary statistics
+1.7  State_Manager persists DatasetProfile metadata
+4.1  State_Manager persists experiment configurations and results
+4.2  State_Manager assigns unique identifiers
+4.3  State_Manager records timestamp, config JSON, metrics, status, session FK
+4.4  State_Manager supports querying by session_id and status
+4.5  State_Manager returns experiments ordered by timestamp
+4.7  State_Manager supports atomic transactions
+4.8  State_Manager retries up to 3 times with exponential backoff
+5.5  State_Manager updates experiment status to 'anomalous'
+8.1  State_Manager creates sessions scoped to a dataset, with unique identifiers
+8.4  State_Manager persists research question, experiment count, cycle count
+8.6  State_Manager lists sessions with summary statistics
 """
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import List, Optional
 
-from sqlalchemy import create_engine, func
+from sqlalchemy import func
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import sessionmaker
 from tenacity import (
@@ -70,8 +82,14 @@ from tenacity import (
 
 import backend.config  # noqa: F401  side-effect: loads .env + configures logging
 from backend.database.connection import get_engine
-from backend.database.models import AnomalyModel, ExperimentModel, SessionModel
+from backend.database.models import (
+    AnomalyModel,
+    DatasetModel,
+    ExperimentModel,
+    SessionModel,
+)
 from backend.models.anomaly import AnomalyReport
+from backend.models.dataset import DatasetProfile
 from backend.models.experiment import ExperimentConfiguration, ExperimentResult
 from backend.models.recommendation import SessionSummary
 
@@ -80,7 +98,7 @@ logger = logging.getLogger(__name__)
 # Retry decorator applied to all public StateManager methods.
 # Retries up to 3 times on transient connection failures, with exponential
 # backoff starting at 1 second and capped at 10 seconds.
-_retry_db = retry( 
+_retry_db = retry(
     retry=retry_if_exception_type(OperationalError),
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=1, max=10),
@@ -90,7 +108,7 @@ _retry_db = retry(
 
 
 class StateManager:
-    """PostgreSQL interface for all experiment and session persistence.
+    """PostgreSQL interface for all dataset, experiment, and session persistence.
 
     Parameters
     ----------
@@ -103,6 +121,7 @@ class StateManager:
         ``database_url`` is ignored.  Useful for injecting an in-memory
         SQLite engine without calling ``get_engine()``.
     """
+
     def __init__(
         self,
         database_url: Optional[str] = None,
@@ -134,6 +153,18 @@ class StateManager:
         )
 
     @staticmethod
+    def _dataset_model_to_profile(row: DatasetModel) -> DatasetProfile:
+        """Reconstruct a DatasetProfile from a DatasetModel ORM row.
+
+        ``row.profile`` is the full JSONB-stored DatasetProfile dict; the
+        surrounding columns (dataset_id, original_filename, storage_path,
+        created_at) are also stored redundantly as their own columns for
+        indexing/querying, but the profile dict is the source of truth for
+        every field, so validating it directly reproduces the full model.
+        """
+        return DatasetProfile.model_validate(row.profile)
+
+    @staticmethod
     def _experiment_model_to_result(row: ExperimentModel) -> ExperimentResult:
         """Convert an ExperimentModel ORM row to an ExperimentResult Pydantic model.
 
@@ -146,6 +177,7 @@ class StateManager:
             experiment_id=row.experiment_id,
             session_id=row.session_id,
             config=config,
+            task_type=row.task_type,  # type: ignore[arg-type]
             metrics=row.metrics,
             status=row.status,  # type: ignore[arg-type]
             error=row.error,
@@ -164,31 +196,87 @@ class StateManager:
         )
 
     # ------------------------------------------------------------------
-    # Session operations  (Task 2.6)
+    # Dataset operations
     # ------------------------------------------------------------------
 
     @_retry_db
-    def create_session(self, research_question: str) -> str:
-        """Create a new research session and return its session_id.
+    def create_dataset(self, profile: DatasetProfile) -> str:
+        """Persist a DatasetProfile and return its dataset_id.
+
+        The profile's own ``dataset_id`` (already assigned by
+        ``ingest_csv``) is used as the primary key, so the caller's
+        in-memory ``DatasetProfile`` and the persisted row always agree.
+
+        Requirements: 1.7
+        """
+        row = DatasetModel(
+            dataset_id=profile.dataset_id,
+            original_filename=profile.original_filename,
+            storage_path=profile.storage_path,
+            profile=profile.model_dump(mode="json"),
+        )
+        with self._Session() as db:
+            db.add(row)
+            db.commit()
+        logger.info("Dataset created: %s (%s)", profile.dataset_id, profile.original_filename)
+        return profile.dataset_id
+
+    @_retry_db
+    def get_dataset(self, dataset_id: str) -> DatasetProfile:
+        """Retrieve a dataset's profile by its UUID.
+
+        Raises
+        ------
+        KeyError
+            If no dataset with the given ``dataset_id`` exists.
+
+        Requirements: 1.7
+        """
+        with self._Session() as db:
+            row = db.get(DatasetModel, dataset_id)
+        if row is None:
+            raise KeyError(f"Dataset not found: {dataset_id!r}")
+        return self._dataset_model_to_profile(row)
+
+    @_retry_db
+    def list_datasets(self) -> List[DatasetProfile]:
+        """List all ingested datasets, newest first.
+
+        Requirements: 1.7
+        """
+        with self._Session() as db:
+            rows = db.query(DatasetModel).order_by(DatasetModel.created_at.desc()).all()
+        return [self._dataset_model_to_profile(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Session operations
+    # ------------------------------------------------------------------
+
+    @_retry_db
+    def create_session(self, research_question: str, dataset_id: str) -> str:
+        """Create a new research session scoped to a dataset, and return its session_id.
 
         Parameters
         ----------
         research_question:
             Natural language question driving the experiment loop.
+        dataset_id:
+            UUID of the dataset this session investigates. Every experiment
+            run within this session references this same dataset.
 
         Returns
         -------
         str
             UUID of the newly created session.
 
-        Requirements: 7.1, 7.4
+        Requirements: 1.7, 8.1, 8.4
         """
-        row = SessionModel(research_question=research_question)
+        row = SessionModel(research_question=research_question, dataset_id=dataset_id)
         with self._Session() as db:
             db.add(row)
             db.commit()
             session_id = row.session_id
-        logger.info("Session created: %s", session_id)
+        logger.info("Session created: %s (dataset=%s)", session_id, dataset_id)
         return session_id
 
     @_retry_db
@@ -210,7 +298,7 @@ class StateManager:
         KeyError
             If no session with the given ``session_id`` exists.
 
-        Requirements: 7.3
+        Requirements: 8.3
         """
         with self._Session() as db:
             row = db.get(SessionModel, session_id)
@@ -230,7 +318,7 @@ class StateManager:
         -------
         List[SessionSummary]
 
-        Requirements: 7.6
+        Requirements: 8.6
         """
         with self._Session() as db:
             rows = (
@@ -268,7 +356,7 @@ class StateManager:
         KeyError
             If the session does not exist.
 
-        Requirements: 7.4
+        Requirements: 8.4
         """
         with self._Session() as db:
             row = db.get(SessionModel, session_id)
@@ -299,7 +387,7 @@ class StateManager:
         current_recommendation:
             If provided, replace the JSON blob recommendation.
 
-        Requirements: 13.9
+        Requirements: 14.9
         """
         with self._Session() as db:
             row = db.get(SessionModel, session_id)
@@ -313,7 +401,7 @@ class StateManager:
             db.commit()
 
     # ------------------------------------------------------------------
-    # Experiment operations  (Task 2.7)
+    # Experiment operations
     # ------------------------------------------------------------------
 
     @_retry_db
@@ -328,12 +416,13 @@ class StateManager:
         experiment:
             Completed experiment result to store.
 
-        Requirements: 3.1, 3.2, 3.3
+        Requirements: 4.1, 4.2, 4.3
         """
         row = ExperimentModel(
             experiment_id=experiment.experiment_id,
             session_id=experiment.session_id,
-            config=experiment.config.model_dump(),  # JSONB: dict -> PostgreSQL JSONB
+            config=experiment.config.model_dump(mode="json"),  # JSONB round-trip
+            task_type=experiment.task_type,
             metrics=experiment.metrics,
             status=experiment.status,
             error=experiment.error,
@@ -368,7 +457,7 @@ class StateManager:
         -------
         List[ExperimentResult]
 
-        Requirements: 3.4, 3.5
+        Requirements: 4.4, 4.5
         """
         with self._Session() as db:
             q = (
@@ -400,7 +489,7 @@ class StateManager:
         KeyError
             If no experiment with the given ID exists.
 
-        Requirements: 3.4
+        Requirements: 4.4
         """
         with self._Session() as db:
             row = db.get(ExperimentModel, experiment_id)
@@ -424,7 +513,7 @@ class StateManager:
         KeyError
             If the experiment does not exist.
 
-        Requirements: 4.5
+        Requirements: 5.5
         """
         with self._Session() as db:
             row = db.get(ExperimentModel, experiment_id)
@@ -435,7 +524,7 @@ class StateManager:
         logger.debug("Experiment %s status -> %s", experiment_id, status)
 
     # ------------------------------------------------------------------
-    # Anomaly operations  (Task 2.8)
+    # Anomaly operations
     # ------------------------------------------------------------------
 
     @_retry_db
@@ -445,9 +534,9 @@ class StateManager:
         Parameters
         ----------
         anomaly:
-            AnomalyReport produced by Phase 3 Anomaly_Detector.
+            AnomalyReport produced by Anomaly_Detector.
 
-        Requirements: 4.5
+        Requirements: 5.5
         """
         row = AnomalyModel(
             anomaly_id=anomaly.anomaly_id,
@@ -492,7 +581,7 @@ class StateManager:
         -------
         List[AnomalyReport]
 
-        Requirements: 4.5
+        Requirements: 5.5
         """
         with self._Session() as db:
             q = db.query(AnomalyModel)

@@ -1,11 +1,12 @@
 ﻿# Adaptive ML Experiment Agent
 
 An intelligent experimentation system that demonstrates genuine agentic AI
-behaviour through a **closed-loop adaptive workflow**. ML researchers submit a
-research question; the system automatically plans experiments, runs them,
-detects anomalies, performs statistical analysis, and recommends the next
-experiment - cycling until sufficient evidence is gathered to answer the
-question.
+behaviour through a **closed-loop adaptive workflow**. A researcher uploads
+their own tabular dataset and submits a research question about it; the
+system profiles the dataset, plans experiments, runs them, detects anomalies,
+performs statistical analysis, and recommends the next experiment - cycling
+until sufficient evidence is gathered to answer the question. The dataset is
+a first-class input: the system is not built around a predefined dataset.
 
 ---
 
@@ -30,8 +31,9 @@ Local PostgreSQL  <->  pgAdmin
 ```
 
 **LLM stack**: [Ollama](https://ollama.com/) + [Qwen](https://ollama.com/library/qwen2.5)
-**Statistical stack**: scipy, pandas, numpy
-**DB**: PostgreSQL (3 tables: sessions, experiments, anomalies)
+**Statistical stack**: scipy, pandas, numpy, scikit-learn
+**DB**: PostgreSQL (4 tables: datasets, sessions, experiments, anomalies)
+**Models**: `mlp` (generic feed-forward network) and `linear_baseline` (logistic/linear regression), chosen automatically by the uploaded dataset's inferred task type
 
 ---
 
@@ -103,15 +105,21 @@ Expected output:
 ```
 INFO  Connecting to database...
 INFO  Running schema.sql...
-INFO  Database initialised successfully. Tables: sessions, experiments, anomalies
+INFO  Database initialised successfully. Tables: datasets, sessions, experiments, anomalies
 ```
+
+> **Schema changes**: this project has no migration tool (no Alembic). If you already had an older
+> database initialised before the dataset-first revision, drop and recreate it before re-running
+> `init_db` - `schema.sql` only handles fresh creation (`CREATE TABLE IF NOT EXISTS`), not altering
+> existing tables to add the new `datasets` table / `sessions.dataset_id` column.
 
 ### 6. Verify in pgAdmin
 
 Navigate to: **mlexperiments -> Schemas -> public -> Tables**
 
-You should see three tables:
-- `sessions` - research sessions
+You should see four tables:
+- `datasets` - uploaded dataset metadata/profile (task type, columns, split seed)
+- `sessions` - research sessions, each scoped to one dataset
 - `experiments` - individual experiment runs
 - `anomalies` - detected anomalies linked to experiments
 
@@ -141,17 +149,20 @@ design-result-analysis-agent/
 |   +-- agents/          # LLM agents (Planner, Recommender) - Phase 4
 |   +-- api/             # FastAPI app and routes - Phase 6
 |   +-- database/
-|   |   +-- schema.sql   # DDL for all 3 tables
+|   |   +-- schema.sql   # DDL for all 4 tables
 |   |   +-- init_db.py   # Schema initialisation script
 |   |   +-- connection.py # SQLAlchemy engine + retry
 |   |   +-- models.py    # ORM models
-|   +-- models/          # Pydantic data models - Phase 2
+|   +-- models/          # Pydantic data models - Phase 2 (incl. DatasetProfile)
 |   +-- state_machine/   # LangGraph graph - Phase 5
-|   +-- tools/           # Deterministic tools - Phases 2-3
+|   +-- tools/
+|   |   +-- dataset/     # CSV ingestion, preprocessing, splitting (Dataset facade)
+|   |   +-- ...          # ExperimentRunner, trainers, StatisticalAnalyzer, AnomalyDetector, StateManager
 |   +-- config.py        # Environment variable loading + logging
 +-- tests/
-|   +-- unit/            # Fast in-memory SQLite tests
+|   +-- unit/            # Fast in-memory SQLite / no-live-dependency tests
 |   +-- integration/     # PostgreSQL integration tests - Phase 8
++-- data/uploads/        # Ingested dataset files (gitignored)
 +-- .env.example         # Environment template
 +-- requirements.txt     # Python dependencies
 +-- README.md
@@ -182,4 +193,6 @@ logic - changing the model is a `.env` change, not a code change.
 | Ollama + Qwen | Local inference, no API key required, model-agnostic adapter |
 | scipy for all statistics | Deterministic, reproducible, never LLM-generated |
 | Template-based anomaly explanations | Faster and cheaper than per-anomaly LLM calls |
-| 3 DB tables (no stats/recommendations tables) | Stats computed on-demand; latest recommendation stored as JSON blob |
+| 4 DB tables (no stats/recommendations tables) | Stats computed on-demand; latest recommendation stored as JSON blob |
+| Dataset-first architecture | Datasets are ingested/profiled once, independent of any experiment; MNIST and synthetic regression were removed rather than kept as special cases |
+| Fixed per-dataset train/val/test split | Experiments differing only in `random_seed` compare model/training randomness, not different rows landing in validation |

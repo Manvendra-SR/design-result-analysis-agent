@@ -8,11 +8,17 @@ AnomalyReport
     Created by Phase 3 Anomaly_Detector, stored by StateManager,
     and used by Phase 4 Recommender_Agent as JSON input.
 
-Detection rules (from DESIGN_REVIEW_CHANGES.md)
-------------------------------------------------
-- ``outlier_detection``    : metric > 3 std devs from group mean
+Detection rules (from DESIGN_REVIEW_CHANGES.md, and its "Architecture
+Revision" entry for the validation_collapse update)
+--------------------------------------------------------------------------
+- ``outlier_detection``    : val_loss > 3 leave-one-out std devs from the
+                             mean of the rest of its (dataset, model_type,
+                             hyperparameters) group
 - ``loss_divergence``      : training loss increases over final 20% of epochs
-- ``validation_collapse``  : validation accuracy < 20% for MNIST
+- ``validation_collapse``  : classification accuracy is not statistically
+                             distinguishable from random guessing for the
+                             dataset's number of classes (class-count-aware
+                             z-test, not a flat threshold)
 
 Explanations are template-based (no LLM calls) — see Phase 3
 backend/tools/anomaly_templates.py for template strings.

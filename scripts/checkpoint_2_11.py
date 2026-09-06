@@ -1,15 +1,15 @@
-﻿import sys, uuid
+import sys, uuid
 from datetime import datetime
 
-print("=== Phase 2 Checkpoint 2.11: PostgreSQL Verification ===")
+print("=== Phase 2 Checkpoint 2.12: PostgreSQL Verification (dataset-first architecture) ===")
 print()
 
 from backend.models import (
-    ExperimentConfiguration, ExperimentResult,
+    DatasetProfile, ExperimentConfiguration, ExperimentResult,
     AnomalyReport, StatisticalComparison, SummaryStatistics,
     Recommendation, SessionSummary
 )
-print("[OK] All 7 Pydantic models import cleanly from backend.models")
+print("[OK] All Pydantic models import cleanly from backend.models")
 
 from backend.database.connection import test_connection
 conn_ok = test_connection()
@@ -25,23 +25,60 @@ print("[OK] Schema applied (idempotent)")
 from backend.tools.state_manager import StateManager
 sm = StateManager()
 
-# 1. Create session
-sid = sm.create_session("Does dropout improve MNIST classification performance?")
-assert sid and len(sid) > 0
-print("[OK] 1. create_session -> " + sid)
+# 1. Create a dataset (dataset-first architecture: sessions are scoped to a dataset)
+profile = DatasetProfile(
+    dataset_id=str(uuid.uuid4()),
+    original_filename="checkpoint_2_12.csv",
+    storage_path="data/uploads/checkpoint-2-12/data.csv",
+    target_column="churned",
+    feature_columns=["tenure_months", "monthly_charges", "contract_type"],
+    numeric_columns=["tenure_months", "monthly_charges"],
+    categorical_columns=["contract_type"],
+    task_type="classification",
+    n_rows=500,
+    n_features=5,
+    n_classes=2,
+    class_labels=["no", "yes"],
+    class_distribution={"no": 350, "yes": 150},
+    missing_value_counts={"tenure_months": 3},
+    split_seed=42,
+)
+did = sm.create_dataset(profile)
+assert did == profile.dataset_id
+print("[OK] 1. create_dataset -> " + did)
 
-# 2. Retrieve session
+# 2. Retrieve dataset - full JSONB round-trip
+retrieved_ds = sm.get_dataset(did)
+assert retrieved_ds.task_type == "classification"
+assert retrieved_ds.n_classes == 2
+assert retrieved_ds.class_labels == ["no", "yes"]
+assert retrieved_ds.split_seed == 42
+print("[OK] 2. get_dataset (JSONB round-trip) -> task_type=" + retrieved_ds.task_type + ", n_classes=" + str(retrieved_ds.n_classes))
+
+# 3. list_datasets includes it
+all_datasets = sm.list_datasets()
+assert any(d.dataset_id == did for d in all_datasets)
+print("[OK] 3. list_datasets -> " + str(len(all_datasets)) + " dataset(s), including ours")
+
+# 4. Create session scoped to the dataset
+sid = sm.create_session("Does model complexity improve performance on this dataset?", did)
+assert sid and len(sid) > 0
+print("[OK] 4. create_session -> " + sid)
+
+# 5. Retrieve session
 session = sm.get_session(sid)
-assert session.research_question == "Does dropout improve MNIST classification performance?"
+assert session.dataset_id == did
 assert session.status == "active"
 assert session.current_node == "planning"
 assert session.cycle_count == 0
-print("[OK] 2. get_session -> status=" + session.status + ", node=" + session.current_node)
+print("[OK] 5. get_session -> dataset_id=" + session.dataset_id + ", status=" + session.status)
 
-# 3. Store experiment with JSONB config
+# 6. Store experiment with JSONB config (new dataset_id/preprocessing shape)
 cfg = ExperimentConfiguration(
-    model_type="mnist_mlp",
-    hyperparameters={"dropout": 0.2, "learning_rate": 0.001, "batch_size": 32},
+    dataset_id=did,
+    model_type="mlp",
+    hyperparameters={"dropout": 0.2, "learning_rate": 0.001, "batch_size": 32,
+                      "hidden_size": 64, "epochs": 20},
     random_seed=42
 )
 eid = str(uuid.uuid4())
@@ -49,25 +86,29 @@ result = ExperimentResult(
     experiment_id=eid,
     session_id=sid,
     config=cfg,
-    metrics={"train_loss": 0.15, "val_loss": 0.18, "accuracy": 0.94, "training_time_seconds": 45.2},
+    task_type="classification",
+    metrics={"train_loss": 0.15, "val_loss": 0.18, "accuracy": 0.94,
+             "n_classes": 2, "n_val_samples": 75, "training_time_seconds": 4.2},
     status="success",
     timestamp=datetime.utcnow()
 )
 sm.store_experiment(result)
-print("[OK] 3. store_experiment -> " + eid)
+print("[OK] 6. store_experiment -> " + eid)
 
-# 4. Retrieve experiment - full JSONB round-trip
+# 7. Retrieve experiment - full JSONB round-trip, including task_type column
 retrieved = sm.get_experiment(eid)
 assert retrieved.experiment_id == eid
 assert retrieved.session_id == sid
 assert retrieved.status == "success"
-assert retrieved.config.model_type == "mnist_mlp"
+assert retrieved.task_type == "classification"
+assert retrieved.config.dataset_id == did
+assert retrieved.config.model_type == "mlp"
 assert abs(retrieved.config.hyperparameters["dropout"] - 0.2) < 1e-9
 assert retrieved.config.random_seed == 42
 assert abs(retrieved.metrics["accuracy"] - 0.94) < 1e-9
-print("[OK] 4. get_experiment (JSONB round-trip) -> model_type=" + retrieved.config.model_type + ", accuracy=" + str(retrieved.metrics["accuracy"]))
+print("[OK] 7. get_experiment (JSONB + task_type round-trip) -> model_type=" + retrieved.config.model_type + ", accuracy=" + str(retrieved.metrics["accuracy"]))
 
-# 5. Store anomaly
+# 8. Store anomaly
 aid = str(uuid.uuid4())
 anomaly = AnomalyReport(
     anomaly_id=aid,
@@ -78,63 +119,66 @@ anomaly = AnomalyReport(
     detected_at=datetime.utcnow()
 )
 sm.store_anomaly(anomaly)
-print("[OK] 5. store_anomaly -> " + aid)
+print("[OK] 8. store_anomaly -> " + aid)
 
-# 6. Query anomaly by session (JOIN path)
+# 9. Query anomaly by session (JOIN path)
 anomalies_by_session = sm.query_anomalies(session_id=sid)
 assert len(anomalies_by_session) == 1
 assert anomalies_by_session[0].experiment_id == eid
 assert anomalies_by_session[0].rule == "outlier_detection"
-print("[OK] 6. query_anomalies(session_id=...) JOIN -> " + str(len(anomalies_by_session)) + " anomaly found")
+print("[OK] 9. query_anomalies(session_id=...) JOIN -> " + str(len(anomalies_by_session)) + " anomaly found")
 
-# 7. FK relationship: second experiment same session
+# 10. FK relationship: second experiment (linear_baseline this time) same session
 eid2 = str(uuid.uuid4())
 cfg2 = ExperimentConfiguration(
-    model_type="mnist_mlp",
-    hyperparameters={"dropout": 0.5, "learning_rate": 0.001, "batch_size": 32},
+    dataset_id=did,
+    model_type="linear_baseline",
     random_seed=99
 )
 result2 = ExperimentResult(
-    experiment_id=eid2, session_id=sid, config=cfg2,
-    metrics={"train_loss": 0.22, "val_loss": 0.25, "accuracy": 0.91, "training_time_seconds": 44.0},
+    experiment_id=eid2, session_id=sid, config=cfg2, task_type="classification",
+    metrics={"train_loss": 0.30, "val_loss": 0.33, "accuracy": 0.87,
+             "n_classes": 2, "n_val_samples": 75, "training_time_seconds": 0.2},
     status="success", timestamp=datetime.utcnow()
 )
 sm.store_experiment(result2)
 all_exp = sm.query_experiments(sid)
 assert len(all_exp) == 2
-print("[OK] 7. FK relationship: " + str(len(all_exp)) + " experiments linked to session " + sid[:8] + "...")
+print("[OK] 10. FK relationship: " + str(len(all_exp)) + " experiments (mlp + linear_baseline) linked to session " + sid[:8] + "...")
 
-# 8. list_sessions with COUNT join
+# 11. list_sessions with COUNT join
 summaries = sm.list_sessions()
 our_summary = next(s for s in summaries if s.session_id == sid)
 assert our_summary.experiment_count == 2
-print("[OK] 8. list_sessions COUNT join -> experiment_count=" + str(our_summary.experiment_count))
+print("[OK] 11. list_sessions COUNT join -> experiment_count=" + str(our_summary.experiment_count))
 
-# 9. update experiment status (anomalous)
+# 12. update experiment status (anomalous)
 sm.update_experiment_status(eid, "anomalous")
 updated = sm.get_experiment(eid)
 assert updated.status == "anomalous"
-print("[OK] 9. update_experiment_status -> " + updated.status)
+print("[OK] 12. update_experiment_status -> " + updated.status)
 
-# 10. update session status  
+# 13. update session status
 sm.update_session_status(sid, "concluded")
 session2 = sm.get_session(sid)
 assert session2.status == "concluded"
-print("[OK] 10. update_session_status -> " + session2.status)
+print("[OK] 13. update_session_status -> " + session2.status)
 
-# 11. Pydantic validator rejects invalid hyperparameters
+# 14. Pydantic validator rejects invalid hyperparameters
 try:
     bad = ExperimentConfiguration(
-        model_type="mnist_mlp",
+        dataset_id=did,
+        model_type="mlp",
         hyperparameters={"dropout": 1.5, "learning_rate": 0.001, "batch_size": 32},
         random_seed=1
     )
     print("[FAIL] Should have raised for dropout=1.5")
     sys.exit(1)
 except Exception:
-    print("[OK] 11. ExperimentConfiguration validator rejects dropout=1.5")
+    print("[OK] 14. ExperimentConfiguration validator rejects dropout=1.5")
 
 print()
-print("=== ALL 11 CHECKS PASSED ===")
+print("=== ALL 14 CHECKS PASSED ===")
+print("Test dataset ID: " + did)
 print("Test session ID: " + sid)
-print("Inspect in pgAdmin: database=design_analytic_agent, tables: sessions, experiments, anomalies")
+print("Inspect in pgAdmin: database=design_analytic_agent, tables: datasets, sessions, experiments, anomalies")

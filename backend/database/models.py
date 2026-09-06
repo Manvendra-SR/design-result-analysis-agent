@@ -1,16 +1,18 @@
 ﻿"""
 backend/database/models.py
 ===========================
-SQLAlchemy ORM models mapping Python classes to the 3 database tables.
+SQLAlchemy ORM models mapping Python classes to the 4 database tables.
 
 Tables
 ------
+DatasetModel    -> datasets    (added by the dataset-first architecture revision)
 SessionModel    -> sessions
 ExperimentModel -> experiments
 AnomalyModel    -> anomalies
 
 Relationships
 -------------
+Session  *  -- 1 Dataset      (a session is scoped to exactly one dataset)
 Session  1 -- * Experiment  (cascade delete)
 Experiment 1 -- * Anomaly   (cascade delete)
 
@@ -55,15 +57,67 @@ class Base(DeclarativeBase):
 
 
 # ---------------------------------------------------------------------------
+# DatasetModel
+# ---------------------------------------------------------------------------
+class DatasetModel(Base):
+    """
+    ORM representation of the ``datasets`` table.
+
+    One row per user-uploaded, ingested CSV dataset. ``profile`` (JSONB)
+    stores the complete ``DatasetProfile`` (task_type, columns, class info,
+    split_seed, ...) - the underlying CSV file itself lives on disk under
+    ``data/uploads/<dataset_id>/`` and is never stored in the database.
+    """
+
+    __tablename__ = "datasets"
+
+    dataset_id: str = Column(
+        UUID_TYPE,
+        primary_key=True,
+        default=lambda: str(uuid.uuid4()),
+        comment="UUID primary key - unique dataset identifier",
+    )
+    original_filename: str = Column(
+        Text, nullable=False, comment="Filename as uploaded by the user"
+    )
+    storage_path: str = Column(
+        Text,
+        nullable=False,
+        comment="Path to the canonical stored CSV copy on disk",
+    )
+    profile: dict = Column(
+        JSON_TYPE,
+        nullable=False,
+        comment="Full DatasetProfile as JSON (task_type, columns, class info, split_seed, ...)",
+    )
+    created_at: datetime = Column(
+        DateTime,
+        nullable=False,
+        default=datetime.utcnow,
+        server_default=func.now(),
+        comment="Dataset ingestion timestamp (UTC)",
+    )
+
+    # Relationship: dataset is referenced by many sessions (no cascade -
+    # deleting a dataset while sessions reference it should fail loudly,
+    # not silently orphan/cascade-delete research history).
+    sessions = relationship("SessionModel", back_populates="dataset")
+
+    def __repr__(self) -> str:
+        return f"<DatasetModel dataset_id={self.dataset_id!r} filename={self.original_filename!r}>"
+
+
+# ---------------------------------------------------------------------------
 # SessionModel
 # ---------------------------------------------------------------------------
 class SessionModel(Base):
     """
     ORM representation of the ``sessions`` table.
 
-    One row per research investigation.  Tracks the current LangGraph node
-    (``current_node``) for crash recovery and stores the latest recommendation
-    as a JSON blob (``current_recommendation``).
+    One row per research investigation, scoped to exactly one Dataset
+    (``dataset_id``). Tracks the current LangGraph node (``current_node``)
+    for crash recovery and stores the latest recommendation as a JSON blob
+    (``current_recommendation``).
     """
 
     __tablename__ = "sessions"
@@ -73,6 +127,13 @@ class SessionModel(Base):
         primary_key=True,
         default=lambda: str(uuid.uuid4()),
         comment="UUID primary key - unique research session identifier",
+    )
+    dataset_id: str = Column(
+        UUID_TYPE,
+        ForeignKey("datasets.dataset_id"),
+        nullable=False,
+        index=True,
+        comment="Foreign key to datasets table - the dataset this session investigates",
     )
     research_question: str = Column(
         Text,
@@ -130,11 +191,14 @@ class SessionModel(Base):
         cascade="all, delete-orphan",
         order_by="ExperimentModel.timestamp",
     )
+    # Relationship: session belongs to exactly one dataset (no cascade)
+    dataset = relationship("DatasetModel", back_populates="sessions")
 
     def __repr__(self) -> str:
         return (
             f"<SessionModel session_id={self.session_id!r} "
-            f"status={self.status!r} current_node={self.current_node!r}>"
+            f"dataset_id={self.dataset_id!r} status={self.status!r} "
+            f"current_node={self.current_node!r}>"
         )
 
 
@@ -148,14 +212,16 @@ class ExperimentModel(Base):
     One row per individual ML experiment run.
 
     ``config`` (JSONB): complete ExperimentConfiguration
-        e.g. {"model_type": "mnist_mlp",
+        e.g. {"dataset_id": "3fa85f64-...", "model_type": "mlp",
                "hyperparameters": {"dropout": 0.2, "learning_rate": 0.001,
-                                   "batch_size": 32},
+                                   "batch_size": 32, "hidden_size": 64, "epochs": 20},
+               "preprocessing": {"normalize": False},
                "random_seed": 42}
 
-    ``metrics`` (JSONB): final training metrics (NULL while pending)
-        e.g. {"train_loss": 0.15, "val_loss": 0.18,
-               "accuracy": 0.94, "training_time_seconds": 120.5}
+    ``metrics`` (JSONB): final training metrics, keyed by task_type (NULL while pending)
+        e.g. classification: {"train_loss": 0.15, "val_loss": 0.18,
+               "accuracy": 0.94, "n_classes": 2, "n_val_samples": 120,
+               "training_time_seconds": 12.5}
 
     ``status``: 'pending' | 'running' | 'success' | 'failed' | 'anomalous'
     """
@@ -178,13 +244,19 @@ class ExperimentModel(Base):
     config: dict = Column(
         JSON_TYPE,
         nullable=False,
-        comment="ExperimentConfiguration as JSON (model_type, hyperparameters, random_seed)",
+        comment="ExperimentConfiguration as JSON (dataset_id, model_type, hyperparameters, preprocessing, random_seed)",
+    )
+    task_type: str | None = Column(
+        String(20),
+        nullable=True,
+        default=None,
+        comment="'classification' | 'regression' - the dataset's task type when this experiment ran",
     )
     metrics: dict | None = Column(
         JSON_TYPE,
         nullable=True,
         default=None,
-        comment="Result metrics as JSON (train_loss, val_loss, accuracy, training_time_seconds)",
+        comment="Result metrics as JSON, keyed by task_type (see ExperimentResult docstring)",
     )
     status: str = Column(
         String(20),

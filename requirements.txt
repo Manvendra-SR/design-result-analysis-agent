@@ -15,14 +15,15 @@ psycopg2-binary==2.9.10
 scipy==1.14.1
 numpy==2.1.2
 pandas==2.2.3
+# linear_baseline model (LogisticRegression/LinearRegression), StandardScaler,
+# and train/val/test splitting for the dataset-first architecture
+scikit-learn==1.5.2
 
-# PyTorch - CUDA 12.8 build
+# PyTorch - CUDA 12.8 build (used by the generic TabularMLP model)
 # The extra index below makes `pip install -r requirements.txt` work out of the box.
 # For a CPU-only build, replace cu128 with cpu in the URL below.
 --extra-index-url https://download.pytorch.org/whl/cu128
 torch==2.7.0
-torchvision==0.22.0
-torchmetrics==1.4.1
 
 # Validation / serialization
 pydantic==2.9.2

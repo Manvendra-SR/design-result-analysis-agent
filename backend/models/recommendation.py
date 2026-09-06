@@ -79,12 +79,16 @@ class Recommendation(BaseModel):
                 "action": "run_more_experiments",
                 "recommended_experiments": [
                     {
-                        "model_type": "mnist_mlp",
+                        "dataset_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+                        "model_type": "mlp",
                         "hyperparameters": {
                             "dropout": 0.1,
                             "learning_rate": 0.001,
                             "batch_size": 32,
+                            "hidden_size": 64,
+                            "epochs": 20,
                         },
+                        "preprocessing": {"normalize": False},
                         "random_seed": 100,
                     }
                 ],

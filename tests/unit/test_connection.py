@@ -154,7 +154,7 @@ def test_reset_engine(monkeypatch):
 # ---------------------------------------------------------------------------
 def test_models_create_tables_in_sqlite():
     """
-    Base.metadata.create_all() produces all 3 tables in SQLite.
+    Base.metadata.create_all() produces all 4 tables in SQLite.
 
     This validates that the ORM model definitions are syntactically correct and
     compatible with SQLite's type system (portable fallbacks for UUID and JSONB).
@@ -165,6 +165,7 @@ def test_models_create_tables_in_sqlite():
     inspector = inspect(engine)
     tables = inspector.get_table_names()
 
+    assert "datasets" in tables, "datasets table missing"
     assert "sessions" in tables, "sessions table missing"
     assert "experiments" in tables, "experiments table missing"
     assert "anomalies" in tables, "anomalies table missing"
@@ -172,10 +173,21 @@ def test_models_create_tables_in_sqlite():
     # Spot-check columns on sessions table
     session_cols = {c["name"] for c in inspector.get_columns("sessions")}
     assert "session_id" in session_cols
+    assert "dataset_id" in session_cols
     assert "research_question" in session_cols
     assert "current_node" in session_cols
     assert "current_recommendation" in session_cols
     assert "cycle_count" in session_cols
+
+    # Spot-check columns on datasets table
+    dataset_cols = {c["name"] for c in inspector.get_columns("datasets")}
+    assert "dataset_id" in dataset_cols
+    assert "profile" in dataset_cols
+
+    # Spot-check FK on sessions -> datasets
+    fks = inspector.get_foreign_keys("sessions")
+    fk_tables = {fk["referred_table"] for fk in fks}
+    assert "datasets" in fk_tables, "sessions should FK to datasets"
 
     # Spot-check FK on experiments -> sessions
     fks = inspector.get_foreign_keys("experiments")

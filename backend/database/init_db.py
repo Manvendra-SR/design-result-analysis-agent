@@ -54,7 +54,7 @@ def init_db() -> None:
 
     logger.info(
         "Database initialised successfully. "
-        "Tables: sessions, experiments, anomalies"
+        "Tables: datasets, sessions, experiments, anomalies"
     )
 
 

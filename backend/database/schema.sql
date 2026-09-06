@@ -1,12 +1,20 @@
 -- ============================================================
 -- Adaptive ML Experiment Agent — Database Schema
 -- ============================================================
--- 3 tables: sessions, experiments, anomalies
+-- 4 tables: datasets, sessions, experiments, anomalies
+-- ("datasets" added by the dataset-first architecture revision - see
+-- DESIGN_REVIEW_CHANGES.md - so a session/experiment can reference a
+-- user-uploaded dataset instead of a hardcoded one.)
 -- Statistical comparisons are computed on-demand (not persisted).
 -- Latest recommendation is stored as a JSON blob in sessions.
 --
 -- Requires PostgreSQL 13+ (gen_random_uuid(), JSONB, TIMESTAMP).
 -- Run via: python -m backend.database.init_db
+--
+-- No migration tool (Alembic) exists in this project. If you already had a
+-- database initialised before the datasets table/sessions.dataset_id
+-- column existed, drop and recreate it before re-running init_db - the
+-- CREATE TABLE IF NOT EXISTS statements below only handle fresh creation.
 -- ============================================================
 
 -- Enable the pgcrypto extension if gen_random_uuid() is not built-in.
@@ -14,11 +22,33 @@
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 -- ------------------------------------------------------------
+-- datasets
+-- One row per user-uploaded, ingested CSV dataset. The CSV file itself
+-- lives on disk under data/uploads/<dataset_id>/ - only its profile
+-- metadata is stored here.
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS datasets (
+    dataset_id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    original_filename   TEXT        NOT NULL,
+    storage_path        TEXT        NOT NULL,
+    -- Full DatasetProfile as JSON: target_column, feature/numeric/categorical
+    -- columns, task_type, task_type_source, n_rows/n_features, n_classes,
+    -- class_labels, class_distribution, missing_value_counts, split_seed.
+    profile             JSONB       NOT NULL,
+    created_at          TIMESTAMP   NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_datasets_created_at
+    ON datasets (created_at DESC);
+
+-- ------------------------------------------------------------
 -- sessions
--- One row per research investigation (research question + adaptive loop).
+-- One row per research investigation (research question + adaptive loop),
+-- scoped to exactly one dataset.
 -- ------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS sessions (
     session_id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    dataset_id              UUID        NOT NULL REFERENCES datasets (dataset_id),
     research_question       TEXT        NOT NULL,
     status                  VARCHAR(20) NOT NULL DEFAULT 'active',
     -- Tracks the current LangGraph node for crash recovery (Phase 5).
@@ -39,6 +69,9 @@ CREATE INDEX IF NOT EXISTS idx_sessions_status
 CREATE INDEX IF NOT EXISTS idx_sessions_created_at
     ON sessions (created_at DESC);
 
+CREATE INDEX IF NOT EXISTS idx_sessions_dataset
+    ON sessions (dataset_id);
+
 -- ------------------------------------------------------------
 -- experiments
 -- One row per individual ML experiment run within a session.
@@ -48,10 +81,15 @@ CREATE TABLE IF NOT EXISTS experiments (
     session_id      UUID        NOT NULL
                         REFERENCES sessions (session_id) ON DELETE CASCADE,
     -- Full ExperimentConfiguration as JSON
-    -- e.g. {"model_type": "mnist_mlp", "hyperparameters": {...}, "random_seed": 42}
+    -- e.g. {"dataset_id": "...", "model_type": "mlp", "hyperparameters": {...},
+    --       "preprocessing": {"normalize": false}, "random_seed": 42}
     config          JSONB       NOT NULL,
-    -- Metrics dict: train_loss, val_loss, accuracy, training_time_seconds
-    -- NULL while experiment is pending/running.
+    -- 'classification' | 'regression' - the dataset's task type when this
+    -- experiment ran. NULL only if the experiment failed before dataset resolution.
+    task_type       VARCHAR(20) DEFAULT NULL,
+    -- Metrics dict, keyed by task_type (classification: train_loss, val_loss,
+    -- accuracy, n_classes, n_val_samples, training_time_seconds; regression:
+    -- train_loss, val_loss, training_time_seconds). NULL while pending/running.
     metrics         JSONB       DEFAULT NULL,
     -- 'pending' | 'running' | 'success' | 'failed' | 'anomalous'
     status          VARCHAR(20) NOT NULL DEFAULT 'pending',

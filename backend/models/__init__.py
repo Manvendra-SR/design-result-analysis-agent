@@ -6,6 +6,9 @@ Pydantic v2 data-transfer objects for the Adaptive ML Experiment Agent.
 
 Public API
 ----------
+DatasetProfile            - profile of a user-uploaded, ingested dataset
+PreprocessingConfig       - the one preprocessing choice exposed per experiment
+DatasetValidationError    - raised by ingest_csv on invalid input
 ExperimentConfiguration   - input spec for one ML experiment run
 ExperimentResult          - completed experiment with metrics (Phase 3 output)
 AnomalyReport             - one detected anomaly (Phase 3 output)
@@ -16,11 +19,15 @@ SessionSummary            - lightweight session overview with experiment count (
 """
 
 from backend.models.anomaly import AnomalyReport
+from backend.models.dataset import DatasetProfile, DatasetValidationError, PreprocessingConfig
 from backend.models.experiment import ExperimentConfiguration, ExperimentResult
 from backend.models.recommendation import Recommendation, SessionSummary
 from backend.models.statistics import StatisticalComparison, SummaryStatistics
 
 __all__ = [
+    "DatasetProfile",
+    "PreprocessingConfig",
+    "DatasetValidationError",
     "ExperimentConfiguration",
     "ExperimentResult",
     "AnomalyReport",
