@@ -199,6 +199,13 @@ class ExperimentResult(BaseModel):
         default=None,
         description="Error message when status='failed'",
     )
+    cycle: Optional[int] = Field(
+        default=None,
+        description=(
+            "1-based adaptive cycle that produced this experiment (set by the "
+            "execution node). None for experiments stored outside the loop."
+        ),
+    )
     timestamp: datetime = Field(
         default_factory=datetime.utcnow,
         description="Experiment run timestamp (UTC)",

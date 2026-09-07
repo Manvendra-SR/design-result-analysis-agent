@@ -11,10 +11,11 @@
 -- Requires PostgreSQL 13+ (gen_random_uuid(), JSONB, TIMESTAMP).
 -- Run via: python -m backend.database.init_db
 --
--- No migration tool (Alembic) exists in this project. If you already had a
--- database initialised before the datasets table/sessions.dataset_id
--- column existed, drop and recreate it before re-running init_db - the
--- CREATE TABLE IF NOT EXISTS statements below only handle fresh creation.
+-- No migration tool (Alembic) exists in this project, and none is wanted
+-- during development: the CREATE TABLE IF NOT EXISTS statements below only
+-- handle fresh creation, so after ANY schema change here (the datasets
+-- table, sessions.dataset_id, sessions.pending_configs / latest_analysis,
+-- ...) drop and recreate the dev database, then re-run init_db.
 -- ============================================================
 
 -- Enable the pgcrypto extension if gen_random_uuid() is not built-in.
@@ -55,9 +56,30 @@ CREATE TABLE IF NOT EXISTS sessions (
     -- Values: 'planning' | 'executing' | 'validating' | 'analyzing'
     --         | 'recommending' | 'concluded'
     current_node            VARCHAR(20) NOT NULL DEFAULT 'planning',
-    -- JSON blob of the latest Recommendation (overwritten each cycle).
-    -- NULL until the first recommendation is generated.
+    -- JSON blob of the LATEST Recommendation (overwritten each cycle).
+    -- NULL until the first recommendation is generated. For the per-cycle
+    -- history, see cycle_history below.
     current_recommendation  TEXT        DEFAULT NULL,
+    -- Phase 5 workflow scratch space (overwritten each time the relevant
+    -- node runs; NULL between uses). Kept as columns on `sessions` rather
+    -- than a separate table for the same reason as current_recommendation -
+    -- ephemeral per-cycle state, not history. See backend/state_machine/nodes.py.
+    --   pending_configs: JSON list of ExperimentConfigurations the planning
+    --     or recommendation node queued for the next execution node.
+    --   latest_analysis: JSON list of StatisticalComparisons the analysis
+    --     node computed for the recommendation node to interpret.
+    pending_configs         TEXT        DEFAULT NULL,
+    latest_analysis         TEXT        DEFAULT NULL,
+    -- Phase 5 investigation HISTORY (not overwritten - appended). The
+    -- adaptive loop runs many cycles per invocation with no human in
+    -- between, so the per-cycle recommendation + analysis must be retained
+    -- for the UI. JSON array of CycleHistoryEntry (see backend/models/cycle.py).
+    --   plan_explanation: the planner's rationale for the initial (cycle 1)
+    --     experiment design - written once, otherwise discarded.
+    --   cycle_history: [{cycle_number, recommendation, statistical_comparisons,
+    --     recorded_at}, ...], appended by the recommending node once per cycle.
+    plan_explanation        TEXT        DEFAULT NULL,
+    cycle_history           TEXT        DEFAULT NULL,
     cycle_count             INTEGER     NOT NULL DEFAULT 0,
     created_at              TIMESTAMP   NOT NULL DEFAULT NOW(),
     updated_at              TIMESTAMP   NOT NULL DEFAULT NOW()
@@ -95,6 +117,9 @@ CREATE TABLE IF NOT EXISTS experiments (
     status          VARCHAR(20) NOT NULL DEFAULT 'pending',
     -- Error message when status = 'failed'
     error           TEXT        DEFAULT NULL,
+    -- 1-based adaptive cycle that produced this experiment (set by the
+    -- execution node). NULL for rows written outside the loop.
+    cycle           INTEGER     DEFAULT NULL,
     timestamp       TIMESTAMP   NOT NULL DEFAULT NOW()
 );
 

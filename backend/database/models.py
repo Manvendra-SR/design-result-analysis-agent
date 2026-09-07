@@ -162,6 +162,39 @@ class SessionModel(Base):
         default=None,
         comment="JSON blob of the latest Recommendation; overwritten each cycle",
     )
+    pending_configs: str | None = Column(
+        Text,
+        nullable=True,
+        default=None,
+        comment=(
+            "Phase 5 scratch: JSON list of ExperimentConfigurations the "
+            "planning/recommendation node queued for the next execution node"
+        ),
+    )
+    latest_analysis: str | None = Column(
+        Text,
+        nullable=True,
+        default=None,
+        comment=(
+            "Phase 5 scratch: JSON list of StatisticalComparisons the "
+            "analysis node computed for the recommendation node"
+        ),
+    )
+    plan_explanation: str | None = Column(
+        Text,
+        nullable=True,
+        default=None,
+        comment="Phase 5 history: the planner's rationale for the cycle-1 design",
+    )
+    cycle_history: str | None = Column(
+        Text,
+        nullable=True,
+        default=None,
+        comment=(
+            "Phase 5 history: JSON array of CycleHistoryEntry (per-cycle "
+            "recommendation + statistical comparisons), appended each cycle"
+        ),
+    )
     cycle_count: int = Column(
         Integer,
         nullable=False,
@@ -269,6 +302,12 @@ class ExperimentModel(Base):
         nullable=True,
         default=None,
         comment="Error message when status='failed'",
+    )
+    cycle: int | None = Column(
+        Integer,
+        nullable=True,
+        default=None,
+        comment="1-based adaptive cycle that produced this experiment (set by the execution node)",
     )
     timestamp: datetime = Column(
         DateTime,

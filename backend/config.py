@@ -43,6 +43,34 @@ Change in .env to switch model without code changes.
 """
 
 # ---------------------------------------------------------------------------
+# Adaptive loop settings (Phase 5)
+# ---------------------------------------------------------------------------
+MAX_ADAPTIVE_CYCLES: int = int(os.environ.get("MAX_ADAPTIVE_CYCLES", "6"))
+"""
+Hard cap on the number of adaptive cycles a single ``execute_cycle`` /
+``POST /run-cycle`` invocation will run. The Recommender_Agent normally
+decides when to stop; this is the safety limit that prevents an infinite
+in-graph loop if it never concludes. Requirement 11 expects 2-3 cycles, so
+6 is generous headroom.
+"""
+
+# ---------------------------------------------------------------------------
+# API settings (FastAPI backend - Phase 6)
+# ---------------------------------------------------------------------------
+CORS_ORIGINS: str = os.environ.get("CORS_ORIGINS", "*")
+"""
+Allowed CORS origins for the API. ``*`` (the default) allows any origin,
+which is fine for local development; set a comma-separated list of origins
+(e.g. ``http://localhost:5173``) for anything else.
+"""
+
+API_HOST: str = os.environ.get("API_HOST", "127.0.0.1")
+"""Host interface the uvicorn entrypoint binds to."""
+
+API_PORT: int = int(os.environ.get("API_PORT", "8000"))
+"""Port the uvicorn entrypoint binds to."""
+
+# ---------------------------------------------------------------------------
 # Logging configuration
 # ---------------------------------------------------------------------------
 _LOG_LEVEL: str = os.environ.get("LOG_LEVEL", "INFO").upper()

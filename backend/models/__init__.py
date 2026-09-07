@@ -17,9 +17,12 @@ StatisticalComparison     - t-test result between two conditions (Phase 3, not p
 SummaryStatistics         - descriptive statistics for a metric set (Phase 3, not persisted)
 Recommendation            - next-action recommendation (Phase 4 output, stored as JSON blob)
 SessionSummary            - lightweight session overview with experiment count (Phase 2)
+CycleHistoryEntry         - one completed adaptive cycle's decision record (Phase 5, stored)
+SessionCycle              - one adaptive cycle fully expanded for the API/UI (Phase 5/6)
 """
 
 from backend.models.anomaly import AnomalyReport
+from backend.models.cycle import CycleHistoryEntry, SessionCycle
 from backend.models.dataset import DatasetProfile, DatasetValidationError, PreprocessingConfig
 from backend.models.experiment import (
     ExperimentConfiguration,
@@ -41,4 +44,6 @@ __all__ = [
     "SummaryStatistics",
     "Recommendation",
     "SessionSummary",
+    "CycleHistoryEntry",
+    "SessionCycle",
 ]

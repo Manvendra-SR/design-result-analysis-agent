@@ -108,10 +108,11 @@ INFO  Running schema.sql...
 INFO  Database initialised successfully. Tables: datasets, sessions, experiments, anomalies
 ```
 
-> **Schema changes**: this project has no migration tool (no Alembic). If you already had an older
-> database initialised before the dataset-first revision, drop and recreate it before re-running
-> `init_db` - `schema.sql` only handles fresh creation (`CREATE TABLE IF NOT EXISTS`), not altering
-> existing tables to add the new `datasets` table / `sessions.dataset_id` column.
+> **Schema changes**: this project has no migration tool (no Alembic), by choice during
+> development. `schema.sql` only handles fresh creation (`CREATE TABLE IF NOT EXISTS`), so after
+> any change to it - the `datasets` table, `sessions.dataset_id`, the Phase 5
+> `sessions.pending_configs` / `sessions.latest_analysis` columns, etc. - drop and recreate the
+> database, then re-run `init_db`.
 
 ### 6. Verify in pgAdmin
 
@@ -130,7 +131,8 @@ foreign-key constraints.
 
 ## Running tests
 
-Unit tests use **in-memory SQLite** - no live PostgreSQL required:
+Unit tests use **in-memory SQLite** - no live PostgreSQL and no Ollama server
+required (the LLM agents and the training runner are stubbed):
 
 ```powershell
 pytest tests/unit/ -v
@@ -138,6 +140,55 @@ pytest tests/unit/ -v
 
 Integration and end-to-end tests (Phase 8) use your local PostgreSQL via
 `DATABASE_URL`.
+
+Per-phase checkpoint scripts do a real end-to-end run and skip gracefully
+when a live dependency is missing:
+
+```powershell
+$env:PYTHONPATH="."; python scripts/checkpoint_5_11.py   # state machine (autonomous loop)
+$env:PYTHONPATH="."; python scripts/checkpoint_6_10.py   # API (all 11 endpoints)
+```
+
+---
+
+## Running the API
+
+```powershell
+python -m backend.api.main          # binds API_HOST:API_PORT (default 127.0.0.1:8000)
+# or: uvicorn backend.api.app:app --reload
+```
+
+Interactive docs at `http://localhost:8000/docs`. Endpoints (all under `/api`):
+
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/datasets` | Ingest a CSV (`{filename, csv_content, target_column, task_type_override?}`) -> `DatasetProfile` |
+| GET | `/datasets`, `/datasets/{id}` | List / fetch dataset profiles |
+| POST | `/sessions` | Create a session (`{research_question, dataset_id}`) |
+| GET | `/sessions`, `/sessions/{id}` | List / fetch sessions (detail includes `plan_explanation`) |
+| POST | `/sessions/{id}/run-cycle` | **Run the whole adaptive investigation.** The graph loops plan -> execute -> validate -> analyze -> recommend -> execute -> ... autonomously until the Recommender concludes or the `MAX_ADAPTIVE_CYCLES` cap. Returns when `status == "concluded"`. If the session crashed mid-run, resumes it and continues. |
+| GET | `/sessions/{id}/cycles` | Per-cycle investigation history: for each adaptive cycle, its experiments, anomalies, statistical comparisons, and the recommendation (with the agent's reasoning for continuing / stopping). This is what a UI renders so the autonomous loop is not a black box. |
+| GET | `/sessions/{id}/experiments?status=` | Experiments for a session (each tagged with the `cycle` that produced it) |
+| GET | `/experiments/{id}` | One experiment |
+| GET | `/sessions/{id}/recommendation` | The **final** recommendation (404 before the first run) |
+
+Every error response has the same shape: `{"error", "message", "details"}`.
+
+### The adaptive loop
+
+`POST /run-cycle` is autonomous: one call runs the entire closed-loop
+investigation. The LangGraph graph has a real `recommending -> executing`
+conditional edge, so cycles repeat inside a single `graph.invoke()` until
+the Recommender returns `action == "conclude"`. `MAX_ADAPTIVE_CYCLES`
+(env, default 6) is the safety cap - if the Recommender never concludes, the
+`recommending` node forces a conclusion and records why in the
+recommendation's `evidence_summary`. There is no per-cycle human approval
+gate; the human inspects the completed investigation via `GET /cycles`.
+
+Crash recovery is a separate mechanism: every node persists
+`sessions.current_node` before returning, and a router on the graph's
+`START` resumes an interrupted session at that node (then it keeps looping
+to conclusion).
 
 ---
 
@@ -147,14 +198,19 @@ Integration and end-to-end tests (Phase 8) use your local PostgreSQL via
 design-result-analysis-agent/
 +-- backend/
 |   +-- agents/          # LLM agents (Planner, Recommender) - Phase 4
-|   +-- api/             # FastAPI app and routes - Phase 6
+|   +-- api/             # FastAPI app, routes, schemas, error handlers - Phase 6
+|   |   +-- app.py       # create_app() + module-level `app` for uvicorn
+|   |   +-- routes/      # sessions, experiments, datasets routers
 |   +-- database/
 |   |   +-- schema.sql   # DDL for all 4 tables
 |   |   +-- init_db.py   # Schema initialisation script
 |   |   +-- connection.py # SQLAlchemy engine + retry
 |   |   +-- models.py    # ORM models
 |   +-- models/          # Pydantic data models - Phase 2 (incl. DatasetProfile)
-|   +-- state_machine/   # LangGraph graph - Phase 5
+|   +-- state_machine/   # LangGraph adaptive loop - Phase 5
+|   |   +-- nodes.py     # planning/executing/validating/analyzing/recommending
+|   |   +-- graph.py     # compiled StateGraph (resumable from any node)
+|   |   +-- executor.py  # execute_cycle(session_id, context) -> CycleResult
 |   +-- tools/
 |   |   +-- dataset/     # CSV ingestion, preprocessing, splitting (Dataset facade)
 |   |   +-- ...          # ExperimentRunner, trainers, StatisticalAnalyzer, AnomalyDetector, StateManager

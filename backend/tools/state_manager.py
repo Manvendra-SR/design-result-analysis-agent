@@ -48,6 +48,24 @@ session/experiment/anomaly methods; the underlying CSV file itself is never
 stored here — only the ``DatasetProfile`` metadata (the file lives on disk,
 written by ``backend/tools/dataset/ingestion.py``).
 
+Phase 5 additions
+-----------------
+Thin JSON-blob accessors on ``sessions``, used by the LangGraph nodes:
+
+- *scratch* (overwritten each cycle - handoff between nodes):
+  ``save_/load_planned_configs`` (``pending_configs``),
+  ``save_/load_analysis`` (``latest_analysis``),
+  ``save_recommendation``/``get_recommendation`` (``current_recommendation``).
+- *history* (appended - the autonomous loop leaves no human in between, so
+  each cycle's decision must be retained for the UI):
+  ``save_plan_explanation`` (``plan_explanation``),
+  ``append_cycle_history``/``get_cycle_history`` (``cycle_history``).
+
+``store_experiment``/``query_experiments`` gained an ``experiments.cycle``
+column (which adaptive cycle produced the row). No existing method's
+behaviour changed, and the ``experiments`` table still only ever holds
+terminal-status rows.
+
 Requirements
 ------------
 1.7  State_Manager persists DatasetProfile metadata
@@ -66,6 +84,7 @@ Requirements
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import List, Optional
 
@@ -89,9 +108,11 @@ from backend.database.models import (
     SessionModel,
 )
 from backend.models.anomaly import AnomalyReport
+from backend.models.cycle import CycleHistoryEntry
 from backend.models.dataset import DatasetProfile
 from backend.models.experiment import ExperimentConfiguration, ExperimentResult
-from backend.models.recommendation import SessionSummary
+from backend.models.recommendation import Recommendation, SessionSummary
+from backend.models.statistics import StatisticalComparison
 
 logger = logging.getLogger(__name__)
 
@@ -181,6 +202,7 @@ class StateManager:
             metrics=row.metrics,
             status=row.status,  # type: ignore[arg-type]
             error=row.error,
+            cycle=row.cycle,
             timestamp=row.timestamp,
         )
 
@@ -426,6 +448,7 @@ class StateManager:
             metrics=experiment.metrics,
             status=experiment.status,
             error=experiment.error,
+            cycle=experiment.cycle,
             timestamp=experiment.timestamp,
         )
         with self._Session() as db:
@@ -597,3 +620,142 @@ class StateManager:
             rows = q.all()
 
         return [self._anomaly_model_to_report(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Phase 5 workflow scratch state
+    # ------------------------------------------------------------------
+    # These wrap the ``sessions.pending_configs`` / ``sessions.latest_analysis``
+    # / ``sessions.current_recommendation`` JSON-blob columns. They exist so
+    # the LangGraph nodes (backend/state_machine/nodes.py) can hand data to
+    # the next node through PostgreSQL only - LangGraph state itself carries
+    # nothing but session_id + current_node. Each is overwritten wholesale on
+    # every write; there is no history.
+
+    def _get_session_or_raise(self, db, session_id: str) -> SessionModel:
+        row = db.get(SessionModel, session_id)
+        if row is None:
+            raise KeyError(f"Session not found: {session_id!r}")
+        return row
+
+    @_retry_db
+    def save_planned_configs(
+        self, session_id: str, configs: List[ExperimentConfiguration]
+    ) -> None:
+        """Persist the configurations queued for the next execution node.
+
+        Pass ``[]`` to clear the queue (the execution node does this once it
+        has run everything). Storing configs here rather than as ``pending``
+        rows in the ``experiments`` table keeps that table holding only
+        terminal-status rows, so ``ExperimentResult`` (whose ``status`` is
+        ``success|failed|anomalous``) never has to represent a pending row.
+        """
+        payload = json.dumps([c.model_dump(mode="json") for c in configs])
+        with self._Session() as db:
+            row = self._get_session_or_raise(db, session_id)
+            row.pending_configs = payload
+            db.commit()
+        logger.debug("Session %s pending_configs <- %d config(s)", session_id, len(configs))
+
+    @_retry_db
+    def load_planned_configs(self, session_id: str) -> List[ExperimentConfiguration]:
+        """Return the queued configurations (empty list if none)."""
+        with self._Session() as db:
+            row = self._get_session_or_raise(db, session_id)
+            raw = row.pending_configs
+        if not raw:
+            return []
+        return [ExperimentConfiguration.model_validate(c) for c in json.loads(raw)]
+
+    @_retry_db
+    def save_analysis(
+        self, session_id: str, comparisons: List[StatisticalComparison]
+    ) -> None:
+        """Persist the analysis node's statistical comparisons for the recommender."""
+        payload = json.dumps([c.model_dump(mode="json") for c in comparisons])
+        with self._Session() as db:
+            row = self._get_session_or_raise(db, session_id)
+            row.latest_analysis = payload
+            db.commit()
+        logger.debug(
+            "Session %s latest_analysis <- %d comparison(s)", session_id, len(comparisons)
+        )
+
+    @_retry_db
+    def load_analysis(self, session_id: str) -> List[StatisticalComparison]:
+        """Return the last analysis node's comparisons (empty list if none)."""
+        with self._Session() as db:
+            row = self._get_session_or_raise(db, session_id)
+            raw = row.latest_analysis
+        if not raw:
+            return []
+        return [StatisticalComparison.model_validate(c) for c in json.loads(raw)]
+
+    @_retry_db
+    def save_recommendation(self, session_id: str, recommendation: Recommendation) -> None:
+        """Persist the latest Recommendation as a JSON blob (overwrites the previous one)."""
+        with self._Session() as db:
+            row = self._get_session_or_raise(db, session_id)
+            row.current_recommendation = recommendation.model_dump_json()
+            db.commit()
+        logger.debug(
+            "Session %s current_recommendation <- action=%s", session_id, recommendation.action
+        )
+
+    @_retry_db
+    def get_recommendation(self, session_id: str) -> Optional[Recommendation]:
+        """Return the latest Recommendation, or ``None`` if none has been produced yet."""
+        with self._Session() as db:
+            row = self._get_session_or_raise(db, session_id)
+            raw = row.current_recommendation
+        if not raw:
+            return None
+        return Recommendation.model_validate_json(raw)
+
+    # ------------------------------------------------------------------
+    # Phase 5 investigation history (appended, not overwritten)
+    # ------------------------------------------------------------------
+    # The adaptive loop runs many cycles per invocation with no human in
+    # between (see backend/state_machine/graph.py), so the per-cycle
+    # recommendation + analysis - which the "latest-only" columns above
+    # overwrite - are also retained here for the UI. Still JSON blobs on
+    # ``sessions`` (same pattern as current_recommendation), not a new table.
+
+    @_retry_db
+    def save_plan_explanation(self, session_id: str, explanation: str) -> None:
+        """Persist the planner's rationale for the initial (cycle-1) experiment design."""
+        with self._Session() as db:
+            row = self._get_session_or_raise(db, session_id)
+            row.plan_explanation = explanation
+            db.commit()
+
+    @_retry_db
+    def append_cycle_history(
+        self, session_id: str, entry: CycleHistoryEntry
+    ) -> None:
+        """Append one completed cycle's decision record to ``sessions.cycle_history``.
+
+        Read-modify-write within a single transaction. Safe because one
+        session runs one investigation at a time (low concurrency, and the
+        graph is single-threaded within an ``invoke``).
+        """
+        with self._Session() as db:
+            row = self._get_session_or_raise(db, session_id)
+            history = json.loads(row.cycle_history) if row.cycle_history else []
+            history.append(entry.model_dump(mode="json"))
+            row.cycle_history = json.dumps(history)
+            db.commit()
+        logger.debug(
+            "Session %s cycle_history <- cycle %d (%s)",
+            session_id, entry.cycle_number, entry.recommendation.action,
+        )
+
+    @_retry_db
+    def get_cycle_history(self, session_id: str) -> List[CycleHistoryEntry]:
+        """Return every completed cycle's decision record, ordered by cycle number."""
+        with self._Session() as db:
+            row = self._get_session_or_raise(db, session_id)
+            raw = row.cycle_history
+        if not raw:
+            return []
+        entries = [CycleHistoryEntry.model_validate(e) for e in json.loads(raw)]
+        return sorted(entries, key=lambda e: e.cycle_number)
