@@ -7,7 +7,7 @@ end-to-end. Mirrors scripts/checkpoint_3_18.py / checkpoint_4_11.py.
 Run:
     PYTHONPATH=. ./.venv/Scripts/python.exe scripts/checkpoint_5_11.py
 
-Offline checks (always run - no Ollama, no PostgreSQL)
+Offline checks (always run - no API key, no PostgreSQL)
 -----------------------------------------------------
 Uses an in-memory SQLite StateManager, stubbed Planner/Recommender, and the
 REAL ExperimentRunner (real torch/scikit-learn training) + real
@@ -24,10 +24,10 @@ AnomalyDetector + real StatisticalAnalyzer.
     MAX_ADAPTIVE_CYCLES
 5b. execute_cycle on a concluded session raises CycleError
 
-Live check (only if an Ollama server answers)
+Live check (only if GROQ_API_KEY is set)
 ---------------------------------------------
 6.  one real autonomous investigation with the real Planner + Recommender
-    against the configured OLLAMA_MODEL (PostgreSQL used if reachable)
+    against the configured GROQ_MODEL (PostgreSQL used if reachable)
 """
 
 import logging
@@ -43,7 +43,8 @@ from sqlalchemy.pool import StaticPool
 print("=== Phase 5 Checkpoint: LangGraph Adaptive-Loop State Machine ===")
 print()
 
-from backend.agents.llm_client import OllamaClient
+import backend.config as config
+from backend.agents.groq_client import GroqClient
 from backend.agents.planner import ExperimentPlannerAgent
 from backend.agents.recommender import RecommenderAgent
 from backend.database.models import Base
@@ -222,18 +223,17 @@ except CycleError:
     print("[OK] 5b. execute_cycle on a concluded session -> CycleError")
 
 # ---------------------------------------------------------------------------
-# 6. Live check against a real Ollama server
+# 6. Live check against Groq
 # ---------------------------------------------------------------------------
-llm = OllamaClient()
-if not llm.health_check():
+if not config.GROQ_API_KEY:
     print()
-    print(f"[SKIP] 6. No Ollama server at {llm.base_url} - live state-machine check skipped.")
-    llm.close()
+    print("[SKIP] 6. GROQ_API_KEY not set - live state-machine check skipped.")
     print()
     print("=== OFFLINE CHECKS PASSED ===")
     sys.exit(0)
 
-print(f"[OK]    Ollama reachable at {llm.base_url}, model={llm.model}")
+llm = GroqClient()
+print(f"[OK]    Groq configured, model={llm.model}")
 logging.getLogger("backend").setLevel(logging.INFO)
 
 from backend.database.connection import test_connection

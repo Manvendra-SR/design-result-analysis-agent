@@ -59,6 +59,16 @@ class DatasetValidationError(ValueError):
     """
 
 
+class DatasetInUseError(RuntimeError):
+    """Raised when deleting a dataset that still has sessions referencing it.
+
+    ``sessions.dataset_id`` is a non-cascading foreign key by design (research
+    history must not be silently orphaned - see ``backend/database/models.py``),
+    so a dataset can only be deleted once every investigation scoped to it has
+    been deleted, or the caller explicitly opts into a cascading delete.
+    """
+
+
 class PreprocessingConfig(BaseModel):
     """The one preprocessing choice exposed as an experiment variable.
 

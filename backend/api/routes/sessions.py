@@ -6,6 +6,7 @@ Session lifecycle, the workflow endpoint, and the investigation history.
     POST   /api/sessions                       create a session (scoped to a dataset)
     GET    /api/sessions                       list sessions with summary stats
     GET    /api/sessions/{id}                   session detail + experiment count
+    DELETE /api/sessions/{id}                   delete a session + its experiments/anomalies
     POST   /api/sessions/{id}/run-cycle        run the whole adaptive investigation
     GET    /api/sessions/{id}/cycles            per-cycle history (for the UI)
     GET    /api/sessions/{id}/recommendation   the final recommendation (404 if none yet)
@@ -39,6 +40,7 @@ from backend.api.dependencies import get_context
 from backend.api.schemas import (
     CreateSessionRequest,
     CreateSessionResponse,
+    DeleteResult,
     RunCycleResponse,
     SessionDetailResponse,
 )
@@ -85,11 +87,32 @@ def get_session(
         research_question=session.research_question,
         status=session.status,
         current_node=session.current_node,
+        run_phase=session.run_phase,
+        run_error=session.run_error,
         cycle_count=session.cycle_count,
         experiment_count=experiment_count,
         plan_explanation=session.plan_explanation,
         created_at=session.created_at,
         updated_at=session.updated_at,
+    )
+
+
+@router.delete("/{session_id}", response_model=DeleteResult)
+def delete_session(
+    session_id: str,
+    ctx: StateMachineContext = Depends(get_context),
+) -> DeleteResult:
+    """Delete an investigation and its experiments + anomalies.
+
+    The referenced dataset is left untouched. There is no lock against
+    deleting a session while a ``run-cycle`` for it is in flight - avoid
+    doing that.
+    """
+    experiments_deleted = ctx.state_manager.delete_session(session_id)  # KeyError -> 404
+    return DeleteResult(
+        deleted="session",
+        id=session_id,
+        experiments_deleted=experiments_deleted,
     )
 
 

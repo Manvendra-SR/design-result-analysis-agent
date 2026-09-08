@@ -16,6 +16,9 @@ Test cases
 3.  test_execute_cycle_on_concluded_session_raises_cycleerror
 4.  test_resume_from_analyzing_continues_to_conclusion
 5.  test_recommendation_error_leaves_current_node_unadvanced
+6.  test_run_phase_is_idle_after_a_clean_run
+7.  test_run_phase_is_failed_after_a_node_raises
+8.  test_resume_after_failure_clears_run_phase
 """
 
 from __future__ import annotations
@@ -133,3 +136,63 @@ def test_recommendation_error_leaves_current_node_unadvanced(state_manager) -> N
     # planning/executing/validating/analyzing ran and advanced; the failure
     # is at 'recommending', so that is where the session is parked for a retry.
     assert state_manager.get_session(sid).current_node == "recommending"
+
+
+def test_run_phase_is_idle_after_a_clean_run(state_manager) -> None:
+    sid = _seed(state_manager)
+    assert state_manager.get_session(sid).run_phase == "idle"  # fresh session
+
+    result = execute_cycle(sid, build_context(state_manager, recommender=StubRecommender()))
+
+    assert result.run_phase == "idle"
+    session = state_manager.get_session(sid)
+    assert session.run_phase == "idle"
+    assert session.run_error is None
+    assert session.status == "concluded"
+
+
+def test_run_phase_is_failed_after_a_node_raises(state_manager) -> None:
+    sid = _seed(state_manager)
+
+    class BoomRecommender:
+        def recommend_next(self, *a, **k):
+            raise RecommendationError("LLM returned an invalid action")
+
+    ctx = build_context(state_manager, recommender=BoomRecommender())
+    with pytest.raises(RecommendationError):
+        execute_cycle(sid, ctx)
+
+    session = state_manager.get_session(sid)
+    assert session.run_phase == "failed"
+    assert session.run_error and "invalid action" in session.run_error
+    assert session.status == "active"  # NOT concluded - resumable
+    assert session.current_node == "recommending"
+
+
+def test_resume_after_failure_clears_run_phase(state_manager) -> None:
+    sid = _seed(state_manager)
+
+    class BoomThenOk:
+        def __init__(self):
+            self.calls = 0
+
+        def recommend_next(self, *a, **k):
+            self.calls += 1
+            if self.calls == 1:
+                raise RecommendationError("transient LLM hiccup")
+            return StubRecommender().recommend_next(*a, **k)
+
+    rec = BoomThenOk()
+    ctx = build_context(state_manager, recommender=rec)
+
+    with pytest.raises(RecommendationError):
+        execute_cycle(sid, ctx)
+    assert state_manager.get_session(sid).run_phase == "failed"
+
+    # Resume: the second call picks up at 'recommending' and concludes.
+    result = execute_cycle(sid, ctx)
+    assert result.run_phase == "idle"
+    session = state_manager.get_session(sid)
+    assert session.run_phase == "idle"
+    assert session.run_error is None
+    assert session.status == "concluded"

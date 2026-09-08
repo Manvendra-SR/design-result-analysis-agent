@@ -28,7 +28,8 @@ torch==2.7.0
 # Validation / serialization
 pydantic==2.9.2
 
-# LLM - Ollama accessed via HTTP API (no Groq SDK)
+# LLM - Groq (OpenAI-compatible) and Gemini (Generative Language) REST APIs,
+# both called directly over HTTP (no provider SDK)
 httpx==0.27.2
 
 # Orchestration

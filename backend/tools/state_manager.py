@@ -109,7 +109,7 @@ from backend.database.models import (
 )
 from backend.models.anomaly import AnomalyReport
 from backend.models.cycle import CycleHistoryEntry
-from backend.models.dataset import DatasetProfile
+from backend.models.dataset import DatasetInUseError, DatasetProfile
 from backend.models.experiment import ExperimentConfiguration, ExperimentResult
 from backend.models.recommendation import Recommendation, SessionSummary
 from backend.models.statistics import StatisticalComparison
@@ -168,6 +168,7 @@ class StateManager:
             session_id=row.session_id,
             research_question=row.research_question,
             status=row.status,
+            run_phase=row.run_phase,
             cycle_count=row.cycle_count,
             experiment_count=experiment_count,
             created_at=row.created_at,
@@ -270,6 +271,67 @@ class StateManager:
             rows = db.query(DatasetModel).order_by(DatasetModel.created_at.desc()).all()
         return [self._dataset_model_to_profile(r) for r in rows]
 
+    @_retry_db
+    def delete_dataset(
+        self, dataset_id: str, *, cascade: bool = False
+    ) -> tuple[int, int]:
+        """Delete a dataset row (its on-disk file is the caller's job).
+
+        Parameters
+        ----------
+        dataset_id:
+            UUID of the dataset to delete.
+        cascade:
+            When ``False`` (default), a dataset that any session still
+            references cannot be deleted - ``DatasetInUseError`` is raised so
+            research history is never silently discarded. When ``True``, those
+            sessions (and their experiments/anomalies, via the ORM cascade)
+            are deleted first.
+
+        Returns
+        -------
+        tuple[int, int]
+            ``(sessions_deleted, experiments_deleted)``.
+
+        Raises
+        ------
+        KeyError
+            If no dataset with the given ``dataset_id`` exists.
+        DatasetInUseError
+            If sessions reference the dataset and ``cascade`` is ``False``.
+        """
+        with self._Session() as db:
+            row = db.get(DatasetModel, dataset_id)
+            if row is None:
+                raise KeyError(f"Dataset not found: {dataset_id!r}")
+
+            sessions = (
+                db.query(SessionModel)
+                .filter(SessionModel.dataset_id == dataset_id)
+                .all()
+            )
+            if sessions and not cascade:
+                raise DatasetInUseError(
+                    f"Dataset {dataset_id!r} is used by {len(sessions)} "
+                    f"investigation(s). Delete those first, or retry with "
+                    f"cascade=true to remove them as well."
+                )
+
+            experiments_deleted = 0
+            for session in sessions:
+                experiments_deleted += len(session.experiments)
+                db.delete(session)  # ORM cascade -> experiments -> anomalies
+
+            db.delete(row)
+            db.commit()
+
+        sessions_deleted = len(sessions)
+        logger.info(
+            "Dataset deleted: %s (cascade=%s, sessions=%d, experiments=%d)",
+            dataset_id, cascade, sessions_deleted, experiments_deleted,
+        )
+        return sessions_deleted, experiments_deleted
+
     # ------------------------------------------------------------------
     # Session operations
     # ------------------------------------------------------------------
@@ -363,6 +425,36 @@ class StateManager:
         ]
 
     @_retry_db
+    def delete_session(self, session_id: str) -> int:
+        """Delete a session and everything under it.
+
+        The session's experiments and their anomalies are removed via the ORM
+        ``cascade="all, delete-orphan"`` relationships, so this is a single
+        atomic transaction. The referenced dataset is left untouched.
+
+        Returns
+        -------
+        int
+            Number of experiments removed along with the session.
+
+        Raises
+        ------
+        KeyError
+            If no session with the given ``session_id`` exists.
+        """
+        with self._Session() as db:
+            row = db.get(SessionModel, session_id)
+            if row is None:
+                raise KeyError(f"Session not found: {session_id!r}")
+            experiments_deleted = len(row.experiments)
+            db.delete(row)
+            db.commit()
+        logger.info(
+            "Session deleted: %s (experiments=%d)", session_id, experiments_deleted
+        )
+        return experiments_deleted
+
+    @_retry_db
     def update_session_status(self, session_id: str, status: str) -> None:
         """Update the status of a session.
 
@@ -387,6 +479,35 @@ class StateManager:
             row.status = status
             db.commit()
         logger.info("Session %s status -> %s", session_id, status)
+
+    @_retry_db
+    def set_run_phase(
+        self,
+        session_id: str,
+        run_phase: str,
+        run_error: Optional[str] = None,
+    ) -> None:
+        """Record whether a ``POST /run-cycle`` is actually in progress.
+
+        ``run_phase`` is one of ``'idle'`` | ``'running'`` | ``'failed'`` and
+        is distinct from ``status`` (which only means active vs concluded).
+        Called by ``state_machine/executor.py`` around ``graph.invoke``.
+        ``run_error`` is stored as-is when ``run_phase == 'failed'`` and
+        cleared to ``NULL`` otherwise.
+
+        Raises
+        ------
+        KeyError
+            If the session does not exist.
+        """
+        with self._Session() as db:
+            row = db.get(SessionModel, session_id)
+            if row is None:
+                raise KeyError(f"Session not found: {session_id!r}")
+            row.run_phase = run_phase
+            row.run_error = run_error if run_phase == "failed" else None
+            db.commit()
+        logger.info("Session %s run_phase -> %s", session_id, run_phase)
 
     @_retry_db
     def update_session_node(

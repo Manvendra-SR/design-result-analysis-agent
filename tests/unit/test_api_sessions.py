@@ -129,14 +129,25 @@ def test_get_session_unknown_returns_404(client_ctx) -> None:
 def test_run_cycle_runs_whole_investigation_to_conclusion(client_ctx) -> None:
     client, _, _ = client_ctx
     sid = _new_session(client)
+
+    # a brand-new session is not running
+    detail = client.get(f"/api/sessions/{sid}").json()
+    assert detail["run_phase"] == "idle"
+    assert detail["run_error"] is None
+
     resp = client.post(f"/api/sessions/{sid}/run-cycle")
     assert resp.status_code == 200
     body = resp.json()
     assert body["current_node"] == "concluded"
     assert body["status"] == "concluded"
+    assert body["run_phase"] == "idle"
     assert body["cycles_completed"] == 2         # run_more_then_conclude
     assert body["experiments_completed"] == 12   # 8 + 4
     assert body["recommendation"]["action"] == "conclude"  # the FINAL one
+
+    # after a clean finish the session is concluded and not running
+    detail = client.get(f"/api/sessions/{sid}").json()
+    assert detail["run_phase"] == "idle"
 
 
 def test_run_cycle_on_concluded_session_returns_409(client_ctx) -> None:
@@ -161,6 +172,14 @@ def test_run_cycle_propagates_planning_error_as_400(state_manager) -> None:
     assert resp.status_code == 400
     assert resp.json()["error"] == "planning_failed"
 
+    # the failure is persisted: the UI can show a failed state after a refresh,
+    # and the session stays resumable (status still 'active').
+    detail = client.get(f"/api/sessions/{sid}").json()
+    assert detail["run_phase"] == "failed"
+    assert detail["run_error"] and "not answerable" in detail["run_error"]
+    assert detail["status"] == "active"
+    assert detail["current_node"] == "planning"
+
 
 # ---------------------------------------------------------------------------
 # recommendation
@@ -182,3 +201,38 @@ def test_get_recommendation_is_the_final_one(client_ctx) -> None:
     # the investigation ran to conclusion, so this is the concluding rec
     assert resp.json()["action"] == "conclude"
     assert resp.json()["recommended_experiments"] == []
+
+
+# ---------------------------------------------------------------------------
+# DELETE /api/sessions/{id}
+# ---------------------------------------------------------------------------
+
+def test_delete_session_removes_it(client_ctx) -> None:
+    client, _, _ = client_ctx
+    sid = _new_session(client)
+    resp = client.delete(f"/api/sessions/{sid}")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["deleted"] == "session" and body["id"] == sid
+    assert client.get(f"/api/sessions/{sid}").status_code == 404
+    assert client.get("/api/sessions").json() == []
+
+
+def test_delete_session_unknown_returns_404(client_ctx) -> None:
+    client, _, _ = client_ctx
+    resp = client.delete("/api/sessions/00000000-0000-0000-0000-000000000000")
+    assert resp.status_code == 404
+
+
+def test_delete_session_removes_its_experiments(client_ctx) -> None:
+    client, _, sm = client_ctx
+    sid = _new_session(client)
+    client.post(f"/api/sessions/{sid}/run-cycle")  # generates experiments
+    assert len(sm.query_experiments(sid)) > 0
+
+    resp = client.delete(f"/api/sessions/{sid}")
+    assert resp.status_code == 200
+    assert resp.json()["experiments_deleted"] > 0
+    assert client.get(f"/api/sessions/{sid}").status_code == 404
+    # the dataset the session used is untouched
+    assert client.get("/api/datasets/ds-test").status_code == 200

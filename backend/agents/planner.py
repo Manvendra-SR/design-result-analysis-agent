@@ -15,10 +15,20 @@ is the deterministic guard rail around that choice:
 - forces ``dataset_id`` to the real dataset (a small local model cannot be
   trusted to echo a UUID, and there is exactly one valid dataset per
   session), logging a warning if the model supplied a different one;
-- enforces Requirement 2.3 explicitly: >= 3 distinct random seeds per
-  distinct configuration;
+- **guarantees Requirement 2.3 by deterministic repair**: any condition the
+  LLM gave fewer than 3 distinct random seeds is topped up with extra
+  configs on fresh, unused seeds (rather than rejecting the whole plan, which
+  a 7B model triggers routinely). See ``_repair_seeds``.
 - enforces that the plan compares at least two conditions (Requirement 2.2
   - "vary one factor at a time" only makes sense with >= 2 levels).
+
+Structured-output retry
+-----------------------
+The LLM call goes through ``request_structured`` (``agents/_common.py``):
+parse + validate + build happen inside a bounded retry loop, so a reply that
+is valid JSON but *semantically* wrong (missing ``explanation``, an
+out-of-range hyperparameter) is fed back to the model to fix before the
+agent gives up with ``PlanValidationError``.
 
 "Exactly one factor at a time" is requested in the prompt but not machine
 -enforced - deciding which of several changing keys is "the factor" is
@@ -41,8 +51,8 @@ Requirements
 2.5  Validate the question is answerable with available models + task type
 2.6  Return an error explaining the limitation when it is not
 2.7  Configurations designed to run quickly (small models)
-15.1 Uses the Ollama HTTP API
-15.8 Does not proceed on malformed LLM output
+15.1 Uses the LLM backend (Groq) via the LLMClient protocol
+15.8 Does not proceed on malformed LLM output (bounded validation retry, then error)
 """
 
 from __future__ import annotations
@@ -52,8 +62,13 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from pydantic import ValidationError
 
-from backend.agents._common import request_json_object
-from backend.agents.llm_client import LLMError, OllamaClient
+from backend.agents._common import StructuredOutputError, request_structured
+from backend.agents.client_factory import create_llm_client
+from backend.agents.llm_client import LLMClient, LLMError
+from backend.agents.output_schemas import (
+    EXPERIMENT_PLAN_SCHEMA,
+    strip_null_hyperparameters,
+)
 from backend.agents.parsing import JSONParseError
 from backend.models.dataset import DatasetProfile
 from backend.models.experiment import ExperimentConfiguration, ExperimentPlan
@@ -135,12 +150,12 @@ class ExperimentPlannerAgent:
     Parameters
     ----------
     llm_client:
-        Ollama adapter. Defaults to a fresh ``OllamaClient`` reading its
-        server URL and model from ``backend.config``. Injected in tests.
+        An ``LLMClient``. Defaults to the provider from ``LLM_PROVIDER``
+        (``create_llm_client``). Injected in tests.
     """
 
-    def __init__(self, llm_client: Optional[OllamaClient] = None) -> None:
-        self._llm = llm_client or OllamaClient()
+    def __init__(self, llm_client: Optional[LLMClient] = None) -> None:
+        self._llm = llm_client or create_llm_client()
 
     def plan_experiments(
         self, research_question: str, dataset_profile: DatasetProfile
@@ -164,9 +179,10 @@ class ExperimentPlannerAgent:
         PlanningError
             If the question is unanswerable or the LLM output is unusable.
         PlanValidationError
-            If the generated configurations violate a hard rule.
+            If the generated configurations violate a hard rule that repair
+            cannot fix (fewer than 2 conditions, an out-of-range value).
         LLMError
-            If the Ollama server cannot be reached.
+            If the LLM backend cannot be reached.
         """
         if not research_question or not research_question.strip():
             raise PlanningError("Research question is empty.")
@@ -176,35 +192,44 @@ class ExperimentPlannerAgent:
             {"role": "user", "content": self._build_user_prompt(research_question, dataset_profile)},
         ]
 
+        def _build(parsed: Dict[str, Any]) -> ExperimentPlan:
+            # A genuine "cannot be answered" reply is terminal - not retried.
+            if isinstance(parsed.get("error"), str) and parsed["error"].strip():
+                raise PlanningError(parsed["error"].strip())
+
+            raw_experiments = parsed.get("experiments")
+            explanation = parsed.get("explanation") or ""
+            if not isinstance(raw_experiments, list) or not raw_experiments:
+                raise StructuredOutputError(
+                    "response has no non-empty 'experiments' array"
+                )
+            if not isinstance(explanation, str) or not explanation.strip():
+                raise StructuredOutputError("response is missing an 'explanation' string")
+
+            configs = self._validate_configs(raw_experiments, dataset_profile)
+            self._require_min_conditions(configs)
+            configs = self._repair_seeds(configs)
+            return ExperimentPlan(experiments=configs, explanation=explanation.strip())
+
         try:
-            parsed = request_json_object(self._llm, messages, options=_PLANNER_OPTIONS)
-        except JSONParseError as exc:
-            raise PlanningError(
-                f"Planner LLM did not return valid JSON after a repair attempt: {exc}"
+            plan = request_structured(
+                self._llm,
+                messages,
+                build=_build,
+                schema=EXPERIMENT_PLAN_SCHEMA,
+                options=_PLANNER_OPTIONS,
+            )
+        except (JSONParseError, StructuredOutputError, ValidationError) as exc:
+            raise PlanValidationError(
+                f"Planner LLM did not produce a usable plan: {exc}"
             ) from exc
         except LLMError:
             raise  # transport failure - let it surface unchanged
 
-        if "error" in parsed and parsed["error"]:
-            raise PlanningError(str(parsed["error"]))
-
-        raw_experiments = parsed.get("experiments")
-        explanation = parsed.get("explanation") or ""
-        if not isinstance(raw_experiments, list) or not raw_experiments:
-            raise PlanValidationError(
-                "Planner response contained no experiments. "
-                f"Got: {str(parsed)[:200]}"
-            )
-        if not isinstance(explanation, str) or not explanation.strip():
-            raise PlanValidationError("Planner response is missing an 'explanation'.")
-
-        configs = self._validate_configs(raw_experiments, dataset_profile)
-
-        plan = ExperimentPlan(experiments=configs, explanation=explanation.strip())
         logger.info(
             "Planner produced %d configurations across %d conditions for dataset %s",
             plan.total_count,
-            len(self._group_by_condition(configs)),
+            len(self._group_by_condition(plan.experiments)),
             dataset_profile.dataset_id,
         )
         return plan
@@ -249,10 +274,12 @@ class ExperimentPlannerAgent:
         configs: List[ExperimentConfiguration] = []
         for i, item in enumerate(raw_experiments):
             if not isinstance(item, dict):
-                raise PlanValidationError(
-                    f"Experiment #{i} is not a JSON object: {item!r}"
+                raise StructuredOutputError(
+                    f"experiment #{i} is not a JSON object: {item!r}"
                 )
-            item = dict(item)  # don't mutate the parsed payload
+            # strict-schema replies carry every mlp hyperparameter as a key,
+            # with null for the ones the model did not choose - drop those.
+            item = strip_null_hyperparameters(dict(item))
             supplied_id = item.get("dataset_id")
             if supplied_id and supplied_id != profile.dataset_id:
                 logger.warning(
@@ -264,32 +291,56 @@ class ExperimentPlannerAgent:
             try:
                 configs.append(ExperimentConfiguration(**item))
             except (ValidationError, TypeError) as exc:
-                raise PlanValidationError(
-                    f"Experiment #{i} failed validation: {exc}"
+                raise StructuredOutputError(
+                    f"experiment #{i} failed validation: {exc}"
                 ) from exc
 
-        self._check_conditions_and_seeds(configs)
         return configs
 
-    def _check_conditions_and_seeds(
+    def _require_min_conditions(
         self, configs: List[ExperimentConfiguration]
     ) -> None:
+        """A plan with < 2 conditions has nothing to compare - retryable."""
         groups = self._group_by_condition(configs)
-
         if len(groups) < _MIN_CONDITIONS:
-            raise PlanValidationError(
-                f"Plan must compare at least {_MIN_CONDITIONS} conditions "
-                f"(one factor varied); got {len(groups)}."
+            raise StructuredOutputError(
+                f"plan must compare at least {_MIN_CONDITIONS} conditions "
+                f"(one factor varied at >= 2 levels); got {len(groups)}"
             )
+
+    def _repair_seeds(
+        self, configs: List[ExperimentConfiguration]
+    ) -> List[ExperimentConfiguration]:
+        """Guarantee >= ``_MIN_SEEDS_PER_CONDITION`` distinct seeds per condition.
+
+        Deterministic: for any short condition, clone its first config onto
+        fresh seeds (the smallest integers above every seed already used in
+        the plan, skipping collisions). A plan the LLM already got right
+        passes through unchanged.
+        """
+        groups = self._group_by_condition(configs)
+        used_seeds = {c.random_seed for c in configs}
+        next_seed = (max(used_seeds) if used_seeds else 41) + 1
+        repaired = list(configs)
 
         for key, group in groups.items():
             seeds = {c.random_seed for c in group}
-            if len(seeds) < _MIN_SEEDS_PER_CONDITION:
-                raise PlanValidationError(
-                    f"Condition {self._describe_condition(key)} has only "
-                    f"{len(seeds)} distinct random seed(s); "
-                    f"at least {_MIN_SEEDS_PER_CONDITION} are required."
-                )
+            if len(seeds) >= _MIN_SEEDS_PER_CONDITION:
+                continue
+            template = group[0]
+            before = len(seeds)
+            while len(seeds) < _MIN_SEEDS_PER_CONDITION:
+                while next_seed in used_seeds:
+                    next_seed += 1
+                used_seeds.add(next_seed)
+                seeds.add(next_seed)
+                repaired.append(template.model_copy(update={"random_seed": next_seed}))
+                next_seed += 1
+            logger.info(
+                "planner: topped up condition %s from %d to %d distinct seeds",
+                self._describe_condition(key), before, _MIN_SEEDS_PER_CONDITION,
+            )
+        return repaired
 
     @staticmethod
     def _group_by_condition(

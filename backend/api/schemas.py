@@ -50,6 +50,13 @@ class SessionDetailResponse(BaseModel):
     research_question: str
     status: str
     current_node: str
+    run_phase: str = Field(
+        description="'idle' | 'running' | 'failed' - whether a run-cycle is actually "
+        "in progress (distinct from `status`). Drives the UI's running/failed state."
+    )
+    run_error: Optional[str] = Field(
+        default=None, description="Error text from the last failed run; null otherwise"
+    )
     cycle_count: int
     experiment_count: int
     plan_explanation: Optional[str] = Field(
@@ -72,6 +79,10 @@ class RunCycleResponse(BaseModel):
     session_id: str
     current_node: str
     status: str
+    run_phase: str = Field(
+        default="idle",
+        description="'idle' when the run finished cleanly, 'failed' if it errored",
+    )
     cycles_completed: int = Field(description="Number of adaptive cycles that ran")
     experiments_completed: int
     recommendation: Optional[Recommendation] = None
@@ -92,6 +103,20 @@ class DatasetIngestRequest(BaseModel):
         default=None,
         description="Force 'classification' or 'regression' instead of the inferred heuristic",
     )
+
+
+class DeleteResult(BaseModel):
+    """Body returned by the two DELETE endpoints.
+
+    ``sessions_deleted`` / ``experiments_deleted`` report what a cascading
+    delete removed alongside the primary resource (both 0 for a plain session
+    delete's session count, since the session itself is the primary resource).
+    """
+
+    deleted: str = Field(description="'session' or 'dataset'")
+    id: str
+    sessions_deleted: int = 0
+    experiments_deleted: int = 0
 
 
 class ErrorResponse(BaseModel):

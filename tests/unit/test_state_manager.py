@@ -59,7 +59,7 @@ from sqlalchemy.exc import OperationalError
 
 from backend.database.models import Base
 from backend.models.anomaly import AnomalyReport
-from backend.models.dataset import DatasetProfile
+from backend.models.dataset import DatasetInUseError, DatasetProfile
 from backend.models.experiment import ExperimentConfiguration, ExperimentResult
 from backend.tools.state_manager import StateManager
 
@@ -484,6 +484,68 @@ def test_query_anomalies_by_session(sm: StateManager, dataset_id: str) -> None:
     assert len(result) == 2
     exp_ids = {a.experiment_id for a in result}
     assert exp_ids == {eid1, eid2}
+
+
+# ---------------------------------------------------------------------------
+# delete_session / delete_dataset
+# ---------------------------------------------------------------------------
+
+def test_delete_session_cascades_experiments_and_anomalies(
+    sm: StateManager, dataset_id: str
+) -> None:
+    sid = sm.create_session("Q", dataset_id)
+    eid = str(uuid.uuid4())
+    cfg = _make_cfg(dataset_id)
+    sm.store_experiment(_make_result(sid, cfg, experiment_id=eid))
+    sm.store_anomaly(_make_anomaly(eid))
+
+    removed = sm.delete_session(sid)
+
+    assert removed == 1
+    with pytest.raises(KeyError):
+        sm.get_session(sid)
+    assert sm.query_experiments(sid) == []
+    assert sm.query_anomalies(session_id=sid) == []
+    # the dataset is untouched
+    assert sm.get_dataset(dataset_id).dataset_id == dataset_id
+
+
+def test_delete_session_unknown_raises_keyerror(sm: StateManager) -> None:
+    with pytest.raises(KeyError):
+        sm.delete_session("00000000-0000-0000-0000-000000000000")
+
+
+def test_delete_dataset_refuses_when_referenced(
+    sm: StateManager, dataset_id: str
+) -> None:
+    sm.create_session("Q", dataset_id)
+    with pytest.raises(DatasetInUseError):
+        sm.delete_dataset(dataset_id)
+    # nothing was removed
+    assert sm.get_dataset(dataset_id).dataset_id == dataset_id
+
+
+def test_delete_dataset_cascade_removes_sessions(
+    sm: StateManager, dataset_id: str
+) -> None:
+    sid = sm.create_session("Q", dataset_id)
+    sm.store_experiment(_make_result(sid, _make_cfg(dataset_id)))
+
+    sessions_deleted, experiments_deleted = sm.delete_dataset(
+        dataset_id, cascade=True
+    )
+
+    assert (sessions_deleted, experiments_deleted) == (1, 1)
+    with pytest.raises(KeyError):
+        sm.get_dataset(dataset_id)
+    with pytest.raises(KeyError):
+        sm.get_session(sid)
+
+
+def test_delete_unused_dataset(sm: StateManager, dataset_id: str) -> None:
+    assert sm.delete_dataset(dataset_id) == (0, 0)
+    with pytest.raises(KeyError):
+        sm.get_dataset(dataset_id)
 
 
 # ---------------------------------------------------------------------------

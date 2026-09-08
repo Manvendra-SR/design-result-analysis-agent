@@ -3,7 +3,7 @@ tests/unit/test_planner.py
 ============================
 Unit tests for backend/agents/planner.py.
 
-The LLM is always a stub returning canned strings - no Ollama server is
+The LLM is always a stub returning canned strings - no network is
 contacted (design.md "Mocked LLM Testing").
 
 Test cases (task 4.6)
@@ -11,9 +11,9 @@ Test cases (task 4.6)
 1.  test_valid_question_produces_experiment_plan
 2.  test_dataset_id_is_forced_onto_every_config
 3.  test_unanswerable_question_raises_planning_error
-4.  test_malformed_json_raises_after_one_repair_attempt
+4.  test_malformed_json_raises_after_exhausting_retries
 5.  test_repair_attempt_can_succeed
-6.  test_fewer_than_three_seeds_per_condition_raises
+6.  test_fewer_than_three_seeds_per_condition_is_repaired_deterministically
 7.  test_single_condition_raises
 8.  test_out_of_range_hyperparameter_raises
 9.  test_empty_research_question_raises
@@ -38,17 +38,27 @@ from backend.models.experiment import ExperimentPlan
 
 
 class _StubLLM:
-    """Minimal stand-in for OllamaClient: returns canned replies in order."""
+    """Minimal stand-in for an LLMClient: returns canned replies in order."""
+
+    model = "stub"
 
     def __init__(self, *responses: str) -> None:
         self._responses = list(responses) or ["{}"]
         self.calls: List[list] = []
+        self.schemas: List[object] = []
 
-    def chat_completion(self, messages, *, format=None, options=None) -> str:  # noqa: A002
+    def chat_json(self, messages, *, schema=None, options=None) -> str:
         self.calls.append(messages)
+        self.schemas.append(schema)
         if len(self._responses) > 1:
             return self._responses.pop(0)
         return self._responses[0]
+
+    def health_check(self) -> bool:
+        return True
+
+    def close(self) -> None:
+        pass
 
 
 def _profile(dataset_id: str = "ds-real") -> DatasetProfile:
@@ -139,13 +149,13 @@ def test_unanswerable_question_raises_planning_error() -> None:
     assert "not about the dataset" in str(excinfo.value)
 
 
-def test_malformed_json_raises_after_one_repair_attempt() -> None:
-    stub = _StubLLM("not json at all", "still not json")
+def test_malformed_json_raises_after_exhausting_retries() -> None:
+    stub = _StubLLM("not json at all", "still not json", "nope")
     agent = ExperimentPlannerAgent(llm_client=stub)
 
     with pytest.raises(PlanningError):
         agent.plan_experiments("Does dropout help?", _profile())
-    assert len(stub.calls) == 2  # initial + one repair
+    assert len(stub.calls) == 3  # initial + 2 retries (bounded)
 
 
 def test_repair_attempt_can_succeed() -> None:
@@ -161,12 +171,26 @@ def test_repair_attempt_can_succeed() -> None:
 # 6-8. Config validation
 # ---------------------------------------------------------------------------
 
-def test_fewer_than_three_seeds_per_condition_raises() -> None:
+def test_fewer_than_three_seeds_per_condition_is_repaired_deterministically() -> None:
+    # Regression: the LLM gave each of 2 conditions only 2 seeds. The planner
+    # must top each up to 3 distinct seeds rather than reject the whole plan.
     agent = ExperimentPlannerAgent(llm_client=_StubLLM(_plan_json(seeds=(42, 43))))
 
-    with pytest.raises(PlanValidationError) as excinfo:
-        agent.plan_experiments("Does dropout help?", _profile())
-    assert "random seed" in str(excinfo.value)
+    plan = agent.plan_experiments("Does dropout help?", _profile())
+
+    by_dropout: dict = {}
+    for c in plan.experiments:
+        by_dropout.setdefault(c.hyperparameters["dropout"], set()).add(c.random_seed)
+    assert set(by_dropout) == {0.0, 0.2}
+    for dropout, seeds in by_dropout.items():
+        assert len(seeds) >= 3, f"dropout={dropout} only has seeds {seeds}"
+    # deterministic: a second identical run yields the same seeds
+    plan2 = ExperimentPlannerAgent(
+        llm_client=_StubLLM(_plan_json(seeds=(42, 43)))
+    ).plan_experiments("Does dropout help?", _profile())
+    assert sorted(c.random_seed for c in plan.experiments) == sorted(
+        c.random_seed for c in plan2.experiments
+    )
 
 
 def test_single_condition_raises() -> None:
@@ -250,3 +274,42 @@ def test_prompt_contains_question_and_dataset_facts() -> None:
     assert "ds-real" in user_msg
     assert "classification" in user_msg
     assert "churned" in user_msg
+
+
+def test_planner_passes_a_json_schema_for_structured_output() -> None:
+    stub = _StubLLM(_plan_json())
+    ExperimentPlannerAgent(llm_client=stub).plan_experiments(
+        "Does dropout help?", _profile()
+    )
+    assert stub.schemas[0] is not None
+    assert "experiments" in stub.schemas[0]["properties"]  # type: ignore[index]
+
+
+def test_planner_strips_null_hyperparameters_from_strict_schema_replies() -> None:
+    # gpt-oss-120b under strict schema returns every mlp hyperparameter, with
+    # null for the ones it did not choose. Those must be dropped, not passed
+    # to ExperimentConfiguration (which expects Dict[str, float]).
+    experiments = [
+        {
+            "model_type": "mlp",
+            "hyperparameters": {
+                "dropout": d,
+                "learning_rate": 0.001,
+                "batch_size": None,
+                "hidden_size": None,
+                "epochs": None,
+            },
+            "preprocessing": {"normalize": False},
+            "random_seed": s,
+        }
+        for d in (0.0, 0.3)
+        for s in (42, 43, 44)
+    ]
+    payload = json.dumps(
+        {"error": None, "experiments": experiments, "explanation": "vary dropout"}
+    )
+    plan = ExperimentPlannerAgent(llm_client=_StubLLM(payload)).plan_experiments(
+        "Does dropout help?", _profile()
+    )
+    for c in plan.experiments:
+        assert set(c.hyperparameters) == {"dropout", "learning_rate"}

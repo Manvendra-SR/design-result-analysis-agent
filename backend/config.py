@@ -31,15 +31,49 @@ Example: postgresql://mluser:password@localhost:5432/mlexperiments
 """
 
 # ---------------------------------------------------------------------------
-# LLM settings (Ollama + Qwen - used from Phase 4 onward)
+# LLM settings (used from Phase 4 onward)
+#
+# The Planner and Recommender agents talk to an LLM through the ``LLMClient``
+# protocol. Two providers are supported; ``LLM_PROVIDER`` picks one:
+#
+#   groq   (default) - Groq Cloud, openai/gpt-oss-120b, OpenAI-compatible API
+#   gemini           - Google Gemini API (GEMINI_API_KEY + GEMINI_MODEL)
+#
+# Both use strict / structured JSON output. The Anomaly_Detector stays
+# template-based - it never calls an LLM.
 # ---------------------------------------------------------------------------
-OLLAMA_BASE_URL: str = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
-"""Base URL of the Ollama HTTP API."""
+LLM_PROVIDER: str = os.environ.get("LLM_PROVIDER", "groq").strip().lower()
+"""Which LLM backend the agents use: ``groq`` (default) or ``gemini``."""
 
-OLLAMA_MODEL: str = os.environ.get("OLLAMA_MODEL", "qwen2.5:7b")
+GROQ_API_KEY: str = os.environ.get("GROQ_API_KEY", "")
+"""Groq Cloud API key. Required when ``LLM_PROVIDER=groq`` - the agents fail fast without it."""
+
+GROQ_BASE_URL: str = os.environ.get(
+    "GROQ_BASE_URL", "https://api.groq.com/openai/v1"
+)
+"""Base URL of Groq's OpenAI-compatible API."""
+
+GROQ_MODEL: str = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")
 """
-Ollama model tag to use for LLM inference.
-Change in .env to switch model without code changes.
+Groq model id. Default ``openai/gpt-oss-120b`` - supports strict
+``response_format`` JSON-schema structured output and has strong reasoning
+for the Recommender. Change in .env to switch model without code changes.
+"""
+
+# --- Gemini (only used when LLM_PROVIDER=gemini) ---------------------------
+GEMINI_API_KEY: str = os.environ.get("GEMINI_API_KEY", "")
+"""Google Gemini API key. Required when ``LLM_PROVIDER=gemini``."""
+
+GEMINI_BASE_URL: str = os.environ.get(
+    "GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta"
+)
+"""Base URL of the Gemini (Generative Language) REST API."""
+
+GEMINI_MODEL: str = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
+"""
+Gemini model id. Default ``gemini-3.8-flash`` - a current, fast model that
+supports ``responseSchema`` structured output. Change in .env to use any
+model your key has access to, without code changes.
 """
 
 # ---------------------------------------------------------------------------
@@ -100,5 +134,7 @@ if DATABASE_URL:
     logger.debug("DATABASE_URL host portion: %s", DATABASE_URL.split("@")[-1] if "@" in DATABASE_URL else "<configured>")
 else:
     logger.debug("DATABASE_URL is not currently set in environment")
-logger.debug("OLLAMA_BASE_URL: %s", OLLAMA_BASE_URL)
-logger.debug("OLLAMA_MODEL: %s", OLLAMA_MODEL)
+if LLM_PROVIDER == "gemini":
+    logger.debug("LLM_PROVIDER=gemini  GEMINI_MODEL: %s (api key %s)", GEMINI_MODEL, "set" if GEMINI_API_KEY else "MISSING")
+else:
+    logger.debug("LLM_PROVIDER=groq  GROQ_MODEL: %s (api key %s)", GROQ_MODEL, "set" if GROQ_API_KEY else "MISSING")

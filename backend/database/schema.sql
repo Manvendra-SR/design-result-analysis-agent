@@ -56,6 +56,14 @@ CREATE TABLE IF NOT EXISTS sessions (
     -- Values: 'planning' | 'executing' | 'validating' | 'analyzing'
     --         | 'recommending' | 'concluded'
     current_node            VARCHAR(20) NOT NULL DEFAULT 'planning',
+    -- Whether a POST /run-cycle is actually in progress, distinct from
+    -- `status` ('active' just means "not concluded"). Set by
+    -- state_machine/executor.py: 'running' on entry, 'failed' + run_error on
+    -- an unhandled node exception, 'idle' on a clean finish. Lets the UI show
+    -- running / failed / idle correctly, incl. after a page refresh.
+    -- Values: 'idle' | 'running' | 'failed'
+    run_phase               VARCHAR(16) NOT NULL DEFAULT 'idle',
+    run_error               TEXT        DEFAULT NULL,
     -- JSON blob of the LATEST Recommendation (overwritten each cycle).
     -- NULL until the first recommendation is generated. For the per-cycle
     -- history, see cycle_history below.

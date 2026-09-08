@@ -60,6 +60,10 @@ class CycleResult(BaseModel):
         "crashed node if a node raised)"
     )
     status: str = Field(description="'active' | 'concluded'")
+    run_phase: str = Field(
+        default="idle",
+        description="'idle' on a clean finish, 'failed' if a node raised",
+    )
     cycles_completed: int = Field(
         description="Number of adaptive cycles run (== sessions.cycle_count)"
     )
@@ -102,23 +106,45 @@ def execute_cycle(session_id: str, context: StateMachineContext) -> CycleResult:
     if session.status == CONCLUDED or session.current_node == CONCLUDED:
         raise CycleError(f"Session {session_id!r} is already concluded.")
 
+    if session.run_phase == "running":
+        # A prior run left the flag set without clearing it (hard crash, or a
+        # genuine concurrent submit). Resuming from `current_node` is the right
+        # move either way; just note it.
+        logger.warning(
+            "execute_cycle: session=%s was already run_phase='running'; resuming",
+            session_id,
+        )
+
     logger.info(
         "execute_cycle: session=%s starting from node=%s (cycle_count=%d, cap=%d)",
         session_id, session.current_node, session.cycle_count, MAX_ADAPTIVE_CYCLES,
     )
 
     graph = build_adaptive_loop_graph(context)
+    sm.set_run_phase(session_id, "running")
     try:
         graph.invoke(
             {"session_id": session_id, "current_node": session.current_node},
             config={"recursion_limit": _RECURSION_LIMIT},
         )
     except GraphRecursionError as exc:
+        sm.set_run_phase(
+            session_id, "failed", run_error="Adaptive loop exceeded the recursion limit."
+        )
         raise CycleError(
             f"Adaptive loop exceeded the LangGraph recursion limit for session "
             f"{session_id!r} - the {MAX_ADAPTIVE_CYCLES}-cycle cap should have "
             f"stopped it first. This is a bug."
         ) from exc
+    except Exception as exc:  # noqa: BLE001 - record, then re-raise unchanged
+        # A node raised (LLM failure, planner could not produce a plan, ...).
+        # `current_node` is left un-advanced by the node, so a later retry
+        # resumes there; persist WHY so the UI can show a failed state that
+        # survives a page refresh.
+        sm.set_run_phase(session_id, "failed", run_error=str(exc)[:2000])
+        raise
+
+    sm.set_run_phase(session_id, "idle")
 
     session = sm.get_session(session_id)
     experiments = sm.query_experiments(session_id)
@@ -126,6 +152,7 @@ def execute_cycle(session_id: str, context: StateMachineContext) -> CycleResult:
         session_id=session_id,
         current_node=session.current_node,
         status=session.status,
+        run_phase=session.run_phase,
         cycles_completed=session.cycle_count,
         experiments_completed=len(experiments),
         recommendation=sm.get_recommendation(session_id),

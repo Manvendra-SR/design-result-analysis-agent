@@ -13,16 +13,19 @@ server.
 from __future__ import annotations
 
 import uvicorn
+import sys
 
 import backend.config as config
 
 
 def main() -> None:
+    reload = "--reload" in sys.argv
     uvicorn.run(
         "backend.api.app:app",
         host=config.API_HOST,
         port=config.API_PORT,
         log_level="info",
+        reload = reload,
     )
 
 

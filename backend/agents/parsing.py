@@ -4,10 +4,10 @@ backend/agents/parsing.py
 ``parse_json_response``: robustly extract a JSON object from an LLM's text
 response.
 
-Even when asked for strict JSON (Ollama's ``"format": "json"``), a 7B local
-model sometimes wraps the object in a ```json ... ``` fence or adds a
-sentence of preamble ("Here is the plan:"). This helper strips that noise
-and returns a plain ``dict``; anything it cannot turn into a top-level JSON
+Groq's strict ``json_schema`` mode returns a bare JSON object, but this
+helper is defensive anyway: if a reply ever arrives wrapped in a
+```json ... ``` fence or with a sentence of preamble, it strips that noise
+and returns a plain ``dict``. Anything it cannot turn into a top-level JSON
 object raises ``JSONParseError`` with a snippet of the offending text, so
 the calling agent can fail loudly rather than proceed on garbage
 (Requirement 15.8).
@@ -87,7 +87,7 @@ def parse_json_response(response: str) -> Dict[str, Any]:
     Parameters
     ----------
     response:
-        Raw assistant text from ``OllamaClient.chat_completion``.
+        Raw assistant text from ``LLMClient.chat_json``.
 
     Returns
     -------

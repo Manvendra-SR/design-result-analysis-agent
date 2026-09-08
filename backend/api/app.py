@@ -7,7 +7,7 @@ The FastAPI application factory.
 ``get_context``); ``app = create_app()`` at module scope is what
 ``uvicorn backend.api.app:app`` serves. The real ``StateMachineContext`` is
 still built lazily on the first request that needs it, so importing this
-module never touches the database or Ollama.
+module never touches the database or Groq.
 
 Middleware / handlers
 ---------------------
@@ -49,15 +49,31 @@ def _cors_origins() -> list[str]:
 @asynccontextmanager
 async def _lifespan(_: FastAPI):
     reachable = test_connection()
+    provider = config.LLM_PROVIDER
+    if provider == "gemini":
+        model, key_set, key_var, key_hint = (
+            config.GEMINI_MODEL, bool(config.GEMINI_API_KEY),
+            "GEMINI_API_KEY", "get a key at https://aistudio.google.com/apikey",
+        )
+    else:
+        model, key_set, key_var, key_hint = (
+            config.GROQ_MODEL, bool(config.GROQ_API_KEY),
+            "GROQ_API_KEY", "free key at https://console.groq.com",
+        )
     logger.info(
-        "API startup: database reachable=%s, ollama=%s/%s",
-        reachable, config.OLLAMA_BASE_URL, config.OLLAMA_MODEL,
+        "API startup: database reachable=%s, llm provider=%s model=%s",
+        reachable, provider, model,
     )
     if not reachable:
         logger.warning(
             "Database is not reachable at startup; requests that touch it will fail "
             "until it comes back (DATABASE_URL=%s).",
             "<set>" if config.DATABASE_URL else "<unset>",
+        )
+    if not key_set:
+        logger.warning(
+            "%s is not set - run-cycle requests will fail until you add it to .env (%s).",
+            key_var, key_hint,
         )
     yield
     logger.info("API shutdown")

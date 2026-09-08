@@ -2,26 +2,26 @@
 scripts/checkpoint_4_11.py
 =============================
 Phase 4 Checkpoint: verify the LLM agents (Experiment_Planner_Agent,
-Recommender_Agent) and their supporting pieces (OllamaClient, JSON parsing).
+Recommender_Agent) and their supporting pieces (GroqClient, JSON parsing).
 Mirrors the style of scripts/checkpoint_3_18.py.
 
 Run with the project venv (needs "backend" importable):
     PYTHONPATH=. ./.venv/Scripts/python.exe scripts/checkpoint_4_11.py
 
-Offline checks (always run - no Ollama server needed)
-----------------------------------------------------
+Offline checks (always run - no API key needed)
+----------------------------------------------
 1.  parse_json_response handles bare / fenced / prose-wrapped JSON and
     raises JSONParseError on garbage
-2.  OllamaClient retries a transient failure and then surfaces LLMError
+2.  GroqClient retries a transient failure and then surfaces LLMError
     when the server stays unreachable (retry backoff disabled for speed)
 3.  backend/agents imports none of scipy/numpy/torch/sqlalchemy
     (LLM / deterministic separation - Requirement 12)
 4.  ExperimentPlannerAgent with a stubbed LLM -> validated ExperimentPlan
 5.  RecommenderAgent with a stubbed LLM -> Recommendation
 
-Live checks (only if an Ollama server answers)
-----------------------------------------------
-6.  Real ExperimentPlannerAgent against the configured OLLAMA_MODEL, on a
+Live checks (only if GROQ_API_KEY is set)
+----------------------------------------
+6.  Real ExperimentPlannerAgent against the configured GROQ_MODEL, on a
     freshly-ingested dataset
 7.  Real RecommenderAgent against sample evidence
 8.  Confirms prompts + responses were logged
@@ -40,7 +40,9 @@ from tenacity import wait_none
 print("=== Phase 4 Checkpoint: LLM Agents (Planner, Recommender) ===")
 print()
 
-from backend.agents.llm_client import LLMError, OllamaClient
+import backend.config as config
+from backend.agents.groq_client import GroqClient
+from backend.agents.llm_client import LLMError
 from backend.agents.parsing import JSONParseError, parse_json_response
 from backend.agents.planner import ExperimentPlannerAgent, PlanValidationError
 from backend.agents.recommender import RecommendationError, RecommenderAgent
@@ -53,12 +55,14 @@ print("[OK] backend.agents imports cleanly")
 
 
 class _StubLLM:
-    """Canned-reply stand-in for OllamaClient (offline checks)."""
+    """Canned-reply stand-in for an LLMClient (offline checks)."""
+
+    model = "stub"
 
     def __init__(self, *replies: str) -> None:
         self._replies = list(replies)
 
-    def chat_completion(self, messages, *, format=None, options=None) -> str:
+    def chat_json(self, messages, *, schema=None, options=None) -> str:
         return self._replies.pop(0) if len(self._replies) > 1 else self._replies[0]
 
 
@@ -76,9 +80,10 @@ except JSONParseError:
 print("[OK] 1. parse_json_response: bare / fenced / prose-wrapped parsed; garbage rejected")
 
 # ---------------------------------------------------------------------------
-# 2. OllamaClient retry + LLMError on an unreachable server
+# 2. GroqClient retry + LLMError on an unreachable server
 # ---------------------------------------------------------------------------
-unreachable = OllamaClient(
+unreachable = GroqClient(
+    api_key="test-key",
     base_url="http://127.0.0.1:9",  # nothing listens on port 9
     model="unused",
     timeout=1.0,
@@ -86,10 +91,10 @@ unreachable = OllamaClient(
     max_attempts=3,
 )
 try:
-    unreachable.chat_completion([{"role": "user", "content": "ping"}])
+    unreachable.chat_json([{"role": "user", "content": "ping"}])
     raise AssertionError("expected LLMError")
 except LLMError as exc:
-    print(f"[OK] 2. OllamaClient unreachable server -> LLMError after retries ({str(exc)[:60]}...)")
+    print(f"[OK] 2. GroqClient unreachable server -> LLMError after retries ({str(exc)[:60]}...)")
 finally:
     unreachable.close()
 
@@ -226,19 +231,17 @@ except RecommendationError:
     print("[OK] 5b. Recommender rejects an invalid action")
 
 # ---------------------------------------------------------------------------
-# 6-8. Live checks against a real Ollama server
+# 6-8. Live checks against Groq
 # ---------------------------------------------------------------------------
-live = OllamaClient()
-if not live.health_check():
+if not config.GROQ_API_KEY:
     print()
-    print(f"[SKIP] 6-8. No Ollama server reachable at {live.base_url} "
-          f"(start it and `ollama pull {live.model}`) - live agent checks skipped.")
-    live.close()
+    print("[SKIP] 6-8. GROQ_API_KEY not set - live agent checks skipped.")
     print()
     print("=== OFFLINE CHECKS PASSED ===")
     sys.exit(0)
 
-print(f"[OK]    Ollama reachable at {live.base_url}, model={live.model}")
+live = GroqClient()
+print(f"[OK]    Groq configured, model={live.model}")
 
 # Turn on DEBUG logging just for the agents so prompts/responses are visible.
 logging.getLogger("backend.agents").setLevel(logging.DEBUG)

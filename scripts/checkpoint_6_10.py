@@ -23,7 +23,7 @@ autonomous adaptive loop:
 9.  409 on run-cycle for a concluded session
 10. CORS headers + consistent ErrorResponse shape
 
-Live (only if Ollama answers): one real autonomous investigation via the API.
+Live (only if GROQ_API_KEY is set): one real autonomous investigation via the API.
 """
 
 import sys
@@ -219,18 +219,18 @@ print("[OK] 10. CORS header present; ErrorResponse shape = {error, message, deta
 # ---------------------------------------------------------------------------
 # Live check
 # ---------------------------------------------------------------------------
-from backend.agents.llm_client import OllamaClient
+import backend.config as config
+from backend.agents.groq_client import GroqClient
 
-llm = OllamaClient()
-if not llm.health_check():
+if not config.GROQ_API_KEY:
     print()
-    print(f"[SKIP] live. No Ollama server at {llm.base_url} - live API cycle skipped.")
-    llm.close()
+    print("[SKIP] live. GROQ_API_KEY not set - live API cycle skipped.")
     print()
     print("=== OFFLINE CHECKS PASSED ===")
     sys.exit(0)
 
-print(f"[OK]    Ollama reachable at {llm.base_url}, model={llm.model}")
+llm = GroqClient()
+print(f"[OK]    Groq configured, model={llm.model}")
 from backend.agents.planner import ExperimentPlannerAgent
 from backend.agents.recommender import RecommenderAgent
 

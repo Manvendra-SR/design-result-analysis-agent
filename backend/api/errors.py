@@ -7,11 +7,12 @@ error bodies by hand.
 
     KeyError                         -> 404  (StateManager "... not found")
     CycleError                       -> 409  (session already concluded)
+    DatasetInUseError                -> 409  (dataset still referenced by sessions)
     PlanningError / PlanValidationError
     RecommendationError
     DatasetValidationError
     RequestValidationError           -> 400  (bad input)
-    LLMError                         -> 502  (Ollama unreachable / bad output)
+    LLMError / LLMConfigError          -> 502  (Groq unreachable / no API key / bad output)
     HTTPException                     -> its own status, reshaped
     Exception                        -> 500  (logged with traceback)
 
@@ -34,7 +35,7 @@ from backend.agents.llm_client import LLMError
 from backend.agents.planner import PlanningError
 from backend.agents.recommender import RecommendationError
 from backend.api.schemas import ErrorResponse
-from backend.models.dataset import DatasetValidationError
+from backend.models.dataset import DatasetInUseError, DatasetValidationError
 from backend.state_machine.executor import CycleError
 
 logger = logging.getLogger(__name__)
@@ -81,6 +82,10 @@ def install_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(DatasetValidationError)
     async def _invalid_dataset(_: Request, exc: DatasetValidationError) -> JSONResponse:
         return JSONResponse(status_code=400, content=_body("invalid_dataset", str(exc)))
+
+    @app.exception_handler(DatasetInUseError)
+    async def _dataset_in_use(_: Request, exc: DatasetInUseError) -> JSONResponse:
+        return JSONResponse(status_code=409, content=_body("dataset_in_use", str(exc)))
 
     @app.exception_handler(LLMError)
     async def _llm_unavailable(_: Request, exc: LLMError) -> JSONResponse:

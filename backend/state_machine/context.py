@@ -14,14 +14,14 @@ module-level singletons, as design.md's sketch did) means:
   ``ExperimentPlannerAgent(llm_client=...)``;
 - the FastAPI layer builds exactly one real context and reuses it.
 
-Both agents share a single ``OllamaClient`` (one HTTP connection pool).
+Both agents share a single LLM client (one HTTP connection pool).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from backend.agents.llm_client import OllamaClient
+from backend.agents.client_factory import create_llm_client
 from backend.agents.planner import ExperimentPlannerAgent
 from backend.agents.recommender import RecommenderAgent
 from backend.tools.anomaly_detector import AnomalyDetector
@@ -43,13 +43,15 @@ class StateMachineContext:
 
     @classmethod
     def create_default(cls) -> "StateMachineContext":
-        """Build a context wired to the real database and the configured Ollama server.
+        """Build a context wired to the real database and the configured LLM.
 
-        Reads ``DATABASE_URL`` / ``OLLAMA_*`` through ``backend.config`` - no
-        network or database I/O happens here (``StateManager`` connects
-        lazily on first use, ``OllamaClient`` only builds an HTTP client).
+        Reads ``DATABASE_URL`` / ``LLM_PROVIDER`` / ``GROQ_*`` / ``GEMINI_*``
+        through ``backend.config`` - no network or database I/O happens here
+        (``StateManager`` connects lazily on first use; the LLM client only
+        builds an HTTP client). A missing API key for the selected provider
+        raises ``LLMConfigError`` here.
         """
-        llm = OllamaClient()
+        llm = create_llm_client()
         return cls(
             state_manager=StateManager(),
             planner=ExperimentPlannerAgent(llm_client=llm),

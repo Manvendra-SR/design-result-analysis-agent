@@ -30,7 +30,7 @@ LangGraph State Machine  (Phase 5)
 Local PostgreSQL  <->  pgAdmin
 ```
 
-**LLM stack**: [Ollama](https://ollama.com/) + [Qwen](https://ollama.com/library/qwen2.5)
+**LLM stack**: pluggable via `LLM_PROVIDER` — [Groq](https://groq.com/) Cloud `openai/gpt-oss-120b` (default) or [Google Gemini](https://ai.google.dev/) `gemini-3.8-flash`, both with structured JSON-schema output
 **Statistical stack**: scipy, pandas, numpy, scikit-learn
 **DB**: PostgreSQL (4 tables: datasets, sessions, experiments, anomalies)
 **Models**: `mlp` (generic feed-forward network) and `linear_baseline` (logistic/linear regression), chosen automatically by the uploaded dataset's inferred task type
@@ -44,7 +44,7 @@ Local PostgreSQL  <->  pgAdmin
 | Python 3.13 | Application runtime |
 | PostgreSQL (local installation) | Database server |
 | pgAdmin 4 | Database inspection / management |
-| Ollama | LLM inference server (needed from Phase 4 onward) |
+| Groq API key | LLM inference (needed from Phase 4 onward) — free at console.groq.com |
 
 ---
 
@@ -90,9 +90,8 @@ Edit `.env` with your actual values:
 # PostgreSQL - adjust user, password, host, port, and db name to match your setup
 DATABASE_URL=postgresql://mluser:yourpassword@localhost:5432/mlexperiments
 
-# Ollama - only needed from Phase 4 onward
-OLLAMA_BASE_URL=http://localhost:11434
-OLLAMA_MODEL=qwen2.5:7b
+# Groq - needed from Phase 4 onward (free key at https://console.groq.com)
+GROQ_API_KEY=gsk_...
 ```
 
 ### 5. Initialise the database schema
@@ -111,8 +110,13 @@ INFO  Database initialised successfully. Tables: datasets, sessions, experiments
 > **Schema changes**: this project has no migration tool (no Alembic), by choice during
 > development. `schema.sql` only handles fresh creation (`CREATE TABLE IF NOT EXISTS`), so after
 > any change to it - the `datasets` table, `sessions.dataset_id`, the Phase 5
-> `sessions.pending_configs` / `sessions.latest_analysis` columns, etc. - drop and recreate the
-> database, then re-run `init_db`.
+> `sessions.pending_configs` / `sessions.latest_analysis` columns, the
+> `sessions.run_phase` / `sessions.run_error` columns (run-state tracking) - drop and recreate the
+> database, then re-run `init_db`:
+> ```powershell
+> # in pgAdmin or psql:  DROP TABLE anomalies, experiments, sessions, datasets CASCADE;
+> python -m backend.database.init_db
+> ```
 
 ### 6. Verify in pgAdmin
 
@@ -131,7 +135,7 @@ foreign-key constraints.
 
 ## Running tests
 
-Unit tests use **in-memory SQLite** - no live PostgreSQL and no Ollama server
+Unit tests use **in-memory SQLite** - no live PostgreSQL and no Groq key
 required (the LLM agents and the training runner are stubbed):
 
 ```powershell
@@ -164,8 +168,10 @@ Interactive docs at `http://localhost:8000/docs`. Endpoints (all under `/api`):
 |---|---|---|
 | POST | `/datasets` | Ingest a CSV (`{filename, csv_content, target_column, task_type_override?}`) -> `DatasetProfile` |
 | GET | `/datasets`, `/datasets/{id}` | List / fetch dataset profiles |
+| DELETE | `/datasets/{id}` | Delete a dataset (DB row + `data/uploads/<id>/`). 409 if any investigation still references it, unless `?cascade=true` (which also deletes those investigations). |
 | POST | `/sessions` | Create a session (`{research_question, dataset_id}`) |
 | GET | `/sessions`, `/sessions/{id}` | List / fetch sessions (detail includes `plan_explanation`) |
+| DELETE | `/sessions/{id}` | Delete an investigation and its experiments + anomalies (cascade). The dataset is left untouched. |
 | POST | `/sessions/{id}/run-cycle` | **Run the whole adaptive investigation.** The graph loops plan -> execute -> validate -> analyze -> recommend -> execute -> ... autonomously until the Recommender concludes or the `MAX_ADAPTIVE_CYCLES` cap. Returns when `status == "concluded"`. If the session crashed mid-run, resumes it and continues. |
 | GET | `/sessions/{id}/cycles` | Per-cycle investigation history: for each adaptive cycle, its experiments, anomalies, statistical comparisons, and the recommendation (with the agent's reasoning for continuing / stopping). This is what a UI renders so the autonomous loop is not a black box. |
 | GET | `/sessions/{id}/experiments?status=` | Experiments for a session (each tagged with the `cycle` that produced it) |
@@ -192,6 +198,46 @@ to conclusion).
 
 ---
 
+## Running the frontend (Phase 7)
+
+React + TypeScript dashboard (Vite) — a light, colour-coded UI. It only reads
+the API and computes no statistics or workflow state of its own. The landing
+page is a two-step flow: **upload a CSV** (drag & drop / browse → preview →
+choose the target column → ingest) then **start an investigation** (research
+question + dataset). CSV upload is read in the browser and posted as text to
+`POST /api/datasets` (no multipart, no backend change).
+
+```powershell
+cd frontend
+npm install
+npm run dev          # http://localhost:5173  (dev proxy /api -> http://localhost:8000)
+```
+
+The backend (`python -m backend.api.main`) must be running. Point the proxy
+elsewhere with `VITE_API_TARGET`.
+
+Checks: `npm run typecheck`, `npm run build`, `npm run test` (vitest + React
+Testing Library).
+
+**Live active-agent view.** `AdaptiveLoopVisualizer` highlights the workflow
+stage named by `sessions.current_node`, polled from `GET /api/sessions/{id}`.
+The highlight (a cyan glow) *pulses* only while a run is genuinely in
+progress — the UI derives a real 4-state value (`idle` / `running` / `failed`
+/ `concluded`) from the backend's `run_phase` column plus the local run
+mutation (`frontend/src/lib/runState.ts`), so:
+- a brand-new session shows **Not running**, not "planning stage active";
+- a failed run shows a **stalled/failed** state with the persisted error and a
+  Resume button — it never keeps showing "running";
+- a page refresh restores the correct state from `run_phase`;
+- on `concluded` the whole loop shows complete and polling stops.
+The highlight still moves only when the backend's persisted node moves — no
+frontend timer. `POST /run-cycle` runs the whole investigation in one request;
+the dashboard fires it in the background and lets the poll drive the visuals.
+See `frontend/README.md` for the divergences from the original Phase 7 task
+list.
+
+---
+
 ## Project structure
 
 ```
@@ -215,6 +261,12 @@ design-result-analysis-agent/
 |   |   +-- dataset/     # CSV ingestion, preprocessing, splitting (Dataset facade)
 |   |   +-- ...          # ExperimentRunner, trainers, StatisticalAnalyzer, AnomalyDetector, StateManager
 |   +-- config.py        # Environment variable loading + logging
++-- frontend/            # React + TypeScript dashboard (Vite) - Phase 7
+|   +-- src/
+|   |   +-- components/  # SessionView + AdaptiveLoopVisualizer, ExperimentTable, etc.
+|   |   +-- hooks/       # react-query hooks (polling lives here)
+|   |   +-- services/    # axios API client
+|   |   +-- types/       # TS mirrors of the Pydantic models
 +-- tests/
 |   +-- unit/            # Fast in-memory SQLite / no-live-dependency tests
 |   +-- integration/     # PostgreSQL integration tests - Phase 8
@@ -228,15 +280,53 @@ design-result-analysis-agent/
 
 ## LLM setup (Phase 4 onward)
 
-1. Install Ollama: https://ollama.com/download
-2. Pull the Qwen model:
-   ```powershell
-   ollama pull qwen2.5:7b
-   ```
-3. Set `OLLAMA_BASE_URL` and `OLLAMA_MODEL` in `.env`.
+Only the **Planner** and **Recommender** agents call an LLM; anomaly
+explanations are template-based.
 
-The LLM adapter (`backend/agents/llm_client.py`) is kept separate from agent
-logic - changing the model is a `.env` change, not a code change.
+The backend is chosen by **`LLM_PROVIDER`** (`groq` — default — or `gemini`);
+both go through the same `LLMClient` interface and the same output schemas, so
+switching is a `.env` change with no code edit. Only the selected provider's
+key is needed; no key → the agents fail fast with a clear message (HTTP 502).
+
+**Groq (default):**
+
+1. Get a free key at https://console.groq.com
+2. `.env`: `GROQ_API_KEY=...` (that's the only required line — `GROQ_MODEL`
+   defaults to `openai/gpt-oss-120b`, `GROQ_BASE_URL` to the standard endpoint).
+
+**Gemini:**
+
+1. Get a key at https://aistudio.google.com/apikey
+2. `.env`: `LLM_PROVIDER=gemini` and `GEMINI_API_KEY=...`. `GEMINI_MODEL`
+   defaults to `gemini-3.8-flash` and accepts any model your key can use; the
+   strict schemas are adapted to Gemini's `responseSchema` automatically.
+
+`gpt-oss-120b` is used with **strict `json_schema` structured output** — the
+Planner / Recommender output schemas (`backend/agents/output_schemas.py`)
+constrain generation so `action` cannot be null, required fields cannot be
+missing, and types are enforced. This is what kills the "unparseable
+recommendation" failure at the source. The provider clients (`GroqClient` /
+`GeminiClient`) and these schemas are the only LLM code — swapping models is a
+`GROQ_MODEL` / `GEMINI_MODEL` change, swapping providers an `LLM_PROVIDER` one.
+
+> **Free-tier rate limit.** Groq's free tier caps `gpt-oss-120b` at ~8000
+> tokens/minute, which a multi-cycle investigation exceeds. `GroqClient`
+> honours the `Retry-After` header and rides it out (a 6-cycle run then takes
+> a few minutes of mostly waiting). For a fast run, upgrade to the **Dev tier**
+> (free — just add a payment method at console.groq.com/settings/billing), or
+> set `GROQ_MODEL=llama-3.3-70b-versatile` (higher free-tier limit).
+
+### Backstop reliability
+
+Beyond the schema, both agents run their LLM call through
+`agents/_common.request_structured`: the reply is parsed **and validated
+against the Pydantic model inside a bounded retry loop** (3 attempts), so
+anything a schema can't express — a hyperparameter out of range,
+`run_more_experiments` with an empty list — is fed back to the model to
+correct before the agent gives up. Validation is never weakened. The Planner
+and Recommender additionally **repair the experiment set deterministically**
+so every condition carries at least 3 distinct random seeds (see below),
+rather than rejecting a plan the model got slightly wrong.
 
 ---
 
@@ -246,7 +336,7 @@ logic - changing the model is a `.env` change, not a code change.
 |---|---|
 | PostgreSQL over SQLite | Production-representative; robust transactions |
 | LangGraph state = session_id + current_node only | PostgreSQL is single source of truth; no state duplication |
-| Ollama + Qwen | Local inference, no API key required, model-agnostic adapter |
+| Groq + gpt-oss-120b default, Gemini optional | Reliable structured output; one HTTP adapter per provider behind `LLMClient`, provider set via `LLM_PROVIDER`, model via `GROQ_MODEL` / `GEMINI_MODEL` |
 | scipy for all statistics | Deterministic, reproducible, never LLM-generated |
 | Template-based anomaly explanations | Faster and cheaper than per-anomaly LLM calls |
 | 4 DB tables (no stats/recommendations tables) | Stats computed on-demand; latest recommendation stored as JSON blob |

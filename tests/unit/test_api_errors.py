@@ -76,7 +76,7 @@ def test_unhandled_exception_becomes_500(state_manager) -> None:
 def test_llm_error_becomes_502(state_manager) -> None:
     class UnreachablePlanner:
         def plan_experiments(self, q, p):
-            raise LLMError("Could not reach Ollama at http://localhost:11434")
+            raise LLMError("Could not reach Groq after retries")
 
     state_manager.create_dataset(make_dataset_profile())
     api_client, _ = make_test_client(state_manager, planner=UnreachablePlanner())

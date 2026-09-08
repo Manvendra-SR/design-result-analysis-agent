@@ -15,7 +15,7 @@ Test cases (task 4.10)
 4.  test_invalid_action_raises
 5.  test_run_more_experiments_with_no_configs_raises
 6.  test_missing_explanation_raises
-7.  test_malformed_json_raises_after_one_repair_attempt
+7.  test_malformed_json_raises_after_exhausting_retries (+ semantic-retry, seed dedup)
 8.  test_no_experiments_raises
 9.  test_conclude_ignores_any_recommended_experiments
 10. test_precomputed_statistics_are_passed_into_the_prompt_verbatim
@@ -37,15 +37,23 @@ from backend.models.statistics import StatisticalComparison
 
 
 class _StubLLM:
+    model = "stub"
+
     def __init__(self, *responses: str) -> None:
         self._responses = list(responses) or ["{}"]
         self.calls: List[list] = []
 
-    def chat_completion(self, messages, *, format=None, options=None) -> str:  # noqa: A002
+    def chat_json(self, messages, *, schema=None, options=None) -> str:
         self.calls.append(messages)
         if len(self._responses) > 1:
             return self._responses.pop(0)
         return self._responses[0]
+
+    def health_check(self) -> bool:
+        return True
+
+    def close(self) -> None:
+        pass
 
 
 def _exp(status: str = "success", dataset_id: str = "ds-1", dropout: float = 0.0, seed: int = 0) -> ExperimentResult:
@@ -143,8 +151,11 @@ def test_run_more_experiments_parses_recommended_configs() -> None:
     rec = agent.recommend_next("Does dropout help?", _EXPERIMENTS, {"a_vs_b": _comparison()}, [])
 
     assert rec.action == "run_more_experiments"
-    assert len(rec.recommended_experiments) == 1
-    assert rec.recommended_experiments[0].hyperparameters["dropout"] == 0.1
+    # The LLM proposed one config (dropout=0.1, seed=7); seed repair tops the
+    # single proposed condition up to 3 distinct seeds.
+    assert {c.hyperparameters["dropout"] for c in rec.recommended_experiments} == {0.1}
+    assert len({c.random_seed for c in rec.recommended_experiments}) >= 3
+    assert 7 in {c.random_seed for c in rec.recommended_experiments}
 
 
 def test_recommended_config_dataset_id_is_forced() -> None:
@@ -190,13 +201,54 @@ def test_missing_explanation_raises() -> None:
         agent.recommend_next("Does dropout help?", _EXPERIMENTS, {}, [])
 
 
-def test_malformed_json_raises_after_one_repair_attempt() -> None:
-    stub = _StubLLM("no json", "still no json")
+def test_malformed_json_raises_after_exhausting_retries() -> None:
+    stub = _StubLLM("no json", "still no json", "nope")
     agent = RecommenderAgent(llm_client=stub)
 
     with pytest.raises(RecommendationError):
         agent.recommend_next("Does dropout help?", _EXPERIMENTS, {}, [])
+    assert len(stub.calls) == 3  # initial + 2 retries (bounded)
+
+
+def test_semantic_validation_error_triggers_a_retry_that_can_succeed() -> None:
+    # First reply is valid JSON but `action` is null - must be retried, not
+    # hard-failed. Second reply is good.
+    bad = json.dumps({"action": None, "explanation": "x", "evidence_summary": "y"})
+    stub = _StubLLM(bad, _conclude_json())
+    agent = RecommenderAgent(llm_client=stub)
+
+    rec = agent.recommend_next("Does dropout help?", _EXPERIMENTS, {}, [])
+
+    assert rec.action == "conclude"
     assert len(stub.calls) == 2
+    # the correction message names the specific problem
+    assert "action" in stub.calls[1][-1]["content"]
+
+
+def test_duplicate_recommended_seeds_are_deduped_then_repaired() -> None:
+    payload = json.dumps(
+        {
+            "action": "run_more_experiments",
+            "recommended_experiments": [
+                {
+                    "dataset_id": "ds-1",
+                    "model_type": "mlp",
+                    "hyperparameters": {"dropout": 0.1, "learning_rate": 0.001, "batch_size": 32},
+                    "preprocessing": {"normalize": False},
+                    "random_seed": 42,
+                }
+            ]
+            * 3,  # same config three times
+            "explanation": "explore dropout=0.1",
+            "evidence_summary": "trend suggests 0.1",
+        }
+    )
+    agent = RecommenderAgent(llm_client=_StubLLM(payload))
+
+    rec = agent.recommend_next("Does dropout help?", _EXPERIMENTS, {}, [])
+
+    seeds = [c.random_seed for c in rec.recommended_experiments]
+    assert len(seeds) == len(set(seeds)) == 3  # deduped to 1, topped up to 3
 
 
 def test_no_experiments_raises() -> None:

@@ -137,3 +137,57 @@ def test_get_dataset_unknown_404(client) -> None:
     resp = client.get("/api/datasets/00000000-0000-0000-0000-000000000000")
     assert resp.status_code == 404
     assert resp.json()["error"] == "not_found"
+
+
+# ---------------------------------------------------------------------------
+# DELETE /api/datasets/{id}
+# ---------------------------------------------------------------------------
+
+def _ingest(client) -> str:
+    return client.post(
+        "/api/datasets",
+        json={
+            "filename": "c.csv",
+            "csv_content": _classification_csv(),
+            "target_column": "label",
+        },
+    ).json()["dataset_id"]
+
+
+def test_delete_unused_dataset(client) -> None:
+    ds_id = _ingest(client)
+    resp = client.delete(f"/api/datasets/{ds_id}")
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {
+        "deleted": "dataset",
+        "id": ds_id,
+        "sessions_deleted": 0,
+        "experiments_deleted": 0,
+    }
+    assert client.get(f"/api/datasets/{ds_id}").status_code == 404
+
+
+def test_delete_dataset_unknown_404(client) -> None:
+    resp = client.request(
+        "DELETE", "/api/datasets/00000000-0000-0000-0000-000000000000"
+    )
+    assert resp.status_code == 404
+
+
+def test_delete_dataset_in_use_returns_409(client, state_manager) -> None:
+    ds_id = _ingest(client)
+    state_manager.create_session("q", ds_id)
+    resp = client.delete(f"/api/datasets/{ds_id}")
+    assert resp.status_code == 409
+    assert resp.json()["error"] == "dataset_in_use"
+    assert client.get(f"/api/datasets/{ds_id}").status_code == 200  # still there
+
+
+def test_delete_dataset_cascade_removes_sessions(client, state_manager) -> None:
+    ds_id = _ingest(client)
+    sid = state_manager.create_session("q", ds_id)
+    resp = client.delete(f"/api/datasets/{ds_id}?cascade=true")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["sessions_deleted"] == 1
+    assert client.get(f"/api/datasets/{ds_id}").status_code == 404
+    assert client.get(f"/api/sessions/{sid}").status_code == 404

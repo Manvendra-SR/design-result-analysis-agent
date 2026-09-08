@@ -23,6 +23,20 @@ dataset). ``action`` must be exactly ``"run_more_experiments"`` (which
 requires a non-empty recommendation list) or ``"conclude"`` (which forces
 the list empty).
 
+Also like the Planner, the recommended batch is **deterministically
+repaired** so every distinct condition it proposes carries >=
+``_MIN_SEEDS_PER_CONDITION`` distinct seeds - exact ``(condition, seed)``
+duplicates are dropped first, then short conditions are topped up on fresh
+seeds. This stops the recommender re-proposing the same seed, and stops a
+2-seed condition from reaching the statistical-analysis node.
+
+Structured-output retry
+-----------------------
+The LLM call goes through ``request_structured``: a reply that parses as
+JSON but is semantically wrong (``action: null``, missing
+``evidence_summary``) is fed back to the model to fix, up to a bounded
+number of attempts, before the agent raises ``RecommendationError``.
+
 Requirements
 ------------
 7.1  Retrieve all experiments in the current session (caller passes them in)
@@ -35,7 +49,7 @@ Requirements
 7.8  Actionable recommendation while not yet conclusive
 7.9  Sufficient evidence -> recommend concluding
 12.3 Receives statistics as input; does NOT compute them
-15.2 Uses the Ollama HTTP API
+15.2 Uses the LLM backend (Groq) via the LLMClient protocol
 15.8 Does not proceed on malformed LLM output
 """
 
@@ -47,8 +61,13 @@ from typing import Any, Dict, List, Optional, Sequence, Union
 
 from pydantic import ValidationError
 
-from backend.agents._common import request_json_object
-from backend.agents.llm_client import LLMError, OllamaClient
+from backend.agents._common import StructuredOutputError, request_structured
+from backend.agents.client_factory import create_llm_client
+from backend.agents.llm_client import LLMClient, LLMError
+from backend.agents.output_schemas import (
+    RECOMMENDATION_SCHEMA,
+    strip_null_hyperparameters,
+)
 from backend.agents.parsing import JSONParseError
 from backend.models.anomaly import AnomalyReport
 from backend.models.experiment import ExperimentConfiguration, ExperimentResult
@@ -58,6 +77,7 @@ from backend.models.statistics import StatisticalComparison
 logger = logging.getLogger(__name__)
 
 _VALID_ACTIONS = ("run_more_experiments", "conclude")
+_MIN_SEEDS_PER_CONDITION = 3  # matches planner._MIN_SEEDS_PER_CONDITION
 # Slightly higher than the planner: the recommender writes a paragraph of
 # reasoning, but structure/action still matter more than prose style.
 _RECOMMENDER_OPTIONS: Dict[str, Any] = {"temperature": 0.3}
@@ -95,6 +115,11 @@ use model_type "mlp" or "linear_baseline", and keep mlp hyperparameters in \
 range (dropout 0-1, learning_rate > 0, batch_size > 0, hidden_size > 0, \
 epochs > 0). linear_baseline takes "hyperparameters": {}.
 
+When action is "run_more_experiments", recommend AT MOST 6 configurations \
+(one or two conditions is normal); the system adds seed replicates itself, \
+so you need only ONE configuration per condition. Keep the explanation and \
+evidence_summary to a few sentences each.
+
 Respond with ONLY a JSON object of this shape:
 {
   "action": "run_more_experiments" | "conclude",
@@ -120,11 +145,12 @@ class RecommenderAgent:
     Parameters
     ----------
     llm_client:
-        Ollama adapter. Defaults to a fresh ``OllamaClient``. Injected in tests.
+        An ``LLMClient``. Defaults to the provider from ``LLM_PROVIDER``
+        (``create_llm_client``). Injected in tests.
     """
 
-    def __init__(self, llm_client: Optional[OllamaClient] = None) -> None:
-        self._llm = llm_client or OllamaClient()
+    def __init__(self, llm_client: Optional[LLMClient] = None) -> None:
+        self._llm = llm_client or create_llm_client()
 
     def recommend_next(
         self,
@@ -158,7 +184,7 @@ class RecommenderAgent:
             If there are no experiments to reason about, or the LLM output
             is unusable / invalid.
         LLMError
-            If the Ollama server cannot be reached.
+            If the LLM backend cannot be reached.
         """
         if not experiments:
             raise RecommendationError(
@@ -174,22 +200,27 @@ class RecommenderAgent:
                 "content": (
                     f'Research question: "{research_question.strip()}"\n\n'
                     f"dataset_id for any recommended experiments: {dataset_id}\n\n"
-                    f"Evidence (JSON):\n{json.dumps(evidence, indent=2, default=str)}\n\n"
+                    f"Evidence (JSON):\n"
+                    f"{json.dumps(evidence, separators=(',', ':'), default=str)}\n\n"
                     "Recommend the next action now."
                 ),
             },
         ]
 
         try:
-            parsed = request_json_object(self._llm, messages, options=_RECOMMENDER_OPTIONS)
-        except JSONParseError as exc:
+            return request_structured(
+                self._llm,
+                messages,
+                build=lambda parsed: self._build_recommendation(parsed, dataset_id),
+                schema=RECOMMENDATION_SCHEMA,
+                options=_RECOMMENDER_OPTIONS,
+            )
+        except (JSONParseError, StructuredOutputError, ValidationError) as exc:
             raise RecommendationError(
-                f"Recommender LLM did not return valid JSON after a repair attempt: {exc}"
+                f"Recommender LLM did not produce a usable recommendation: {exc}"
             ) from exc
         except LLMError:
             raise
-
-        return self._build_recommendation(parsed, dataset_id)
 
     # ------------------------------------------------------------------
     # Evidence serialisation (input to the prompt)
@@ -201,19 +232,28 @@ class RecommenderAgent:
         statistical_results: _StatsInput,
         anomalies: List[AnomalyReport],
     ) -> Dict[str, Any]:
-        exp_rows = [
-            {
-                "experiment_id": e.experiment_id[:8],
-                "model_type": e.config.model_type,
-                "hyperparameters": e.config.hyperparameters,
-                "preprocessing": e.config.preprocessing.model_dump(),
-                "random_seed": e.config.random_seed,
+        # Kept compact on purpose - the prompt grows with every cycle and
+        # hosted models meter tokens per minute. Redundant-across-rows fields
+        # (task_type, experiment_id) and default preprocessing are dropped;
+        # metrics are rounded.
+        def _row(e: ExperimentResult) -> Dict[str, Any]:
+            row: Dict[str, Any] = {
+                "model": e.config.model_type,
+                "hp": e.config.hyperparameters,
+                "seed": e.config.random_seed,
                 "status": e.status,
-                "task_type": e.task_type,
-                "metrics": e.metrics,
+                "metrics": (
+                    {k: round(v, 4) for k, v in e.metrics.items()}
+                    if e.metrics
+                    else None
+                ),
             }
-            for e in experiments
-        ]
+            if e.config.preprocessing.normalize:
+                row["normalize"] = True
+            return row
+
+        exp_rows = [_row(e) for e in experiments]
+        task_type = next((e.task_type for e in experiments if e.task_type), None)
 
         if statistical_results is None:
             stats_out: Any = {}
@@ -226,9 +266,13 @@ class RecommenderAgent:
             stats_out = [comp.model_dump(mode="json") for comp in statistical_results]
 
         return {
+            "task_type": task_type,
             "experiments": exp_rows,
             "statistical_comparisons": stats_out,
-            "anomalies": [a.model_dump(mode="json") for a in anomalies],
+            "anomalies": [
+                {"rule": a.rule, "severity": a.severity, "explanation": a.explanation}
+                for a in anomalies
+            ],
             "counts": {
                 "total": len(experiments),
                 "success": sum(1 for e in experiments if e.status == "success"),
@@ -246,29 +290,29 @@ class RecommenderAgent:
     ) -> Recommendation:
         action = parsed.get("action")
         if action not in _VALID_ACTIONS:
-            raise RecommendationError(
-                f"Recommender returned an invalid action {action!r}; "
-                f"expected one of {_VALID_ACTIONS}."
+            raise StructuredOutputError(
+                f"'action' is {action!r}; must be one of {_VALID_ACTIONS}"
             )
 
         explanation = parsed.get("explanation")
         evidence_summary = parsed.get("evidence_summary")
         if not isinstance(explanation, str) or not explanation.strip():
-            raise RecommendationError("Recommender response is missing an 'explanation'.")
+            raise StructuredOutputError("response is missing an 'explanation' string")
         if not isinstance(evidence_summary, str) or not evidence_summary.strip():
-            raise RecommendationError(
-                "Recommender response is missing an 'evidence_summary'."
+            raise StructuredOutputError(
+                "response is missing an 'evidence_summary' string"
             )
 
         recommended: List[ExperimentConfiguration] = []
         if action == "run_more_experiments":
             raw_recs = parsed.get("recommended_experiments") or []
             if not isinstance(raw_recs, list) or not raw_recs:
-                raise RecommendationError(
-                    "action is 'run_more_experiments' but no recommended "
-                    "experiments were provided."
+                raise StructuredOutputError(
+                    "action is 'run_more_experiments' but 'recommended_experiments' "
+                    "is empty"
                 )
             recommended = self._validate_configs(raw_recs, dataset_id)
+            recommended = self._repair_seeds(recommended)
 
         rec = Recommendation(
             action=action,  # type: ignore[arg-type]
@@ -289,10 +333,10 @@ class RecommenderAgent:
         configs: List[ExperimentConfiguration] = []
         for i, item in enumerate(raw_recs):
             if not isinstance(item, dict):
-                raise RecommendationError(
-                    f"Recommended experiment #{i} is not a JSON object: {item!r}"
+                raise StructuredOutputError(
+                    f"recommended experiment #{i} is not a JSON object: {item!r}"
                 )
-            item = dict(item)
+            item = strip_null_hyperparameters(dict(item))
             supplied_id = item.get("dataset_id")
             if supplied_id and supplied_id != dataset_id:
                 logger.warning(
@@ -303,7 +347,63 @@ class RecommenderAgent:
             try:
                 configs.append(ExperimentConfiguration(**item))
             except (ValidationError, TypeError) as exc:
-                raise RecommendationError(
-                    f"Recommended experiment #{i} failed validation: {exc}"
+                raise StructuredOutputError(
+                    f"recommended experiment #{i} failed validation: {exc}"
                 ) from exc
         return configs
+
+    @staticmethod
+    def _condition_key(config: ExperimentConfiguration) -> Any:
+        return (
+            config.model_type,
+            config.preprocessing.normalize,
+            tuple(sorted(config.hyperparameters.items())),
+        )
+
+    def _repair_seeds(
+        self, configs: List[ExperimentConfiguration]
+    ) -> List[ExperimentConfiguration]:
+        """Dedup exact ``(condition, seed)`` repeats, then top every proposed
+        condition up to >= ``_MIN_SEEDS_PER_CONDITION`` distinct seeds on fresh
+        seed values. Deterministic. Mirrors ``ExperimentPlannerAgent._repair_seeds``.
+        """
+        # 1. drop exact (condition, seed) duplicates, keep first occurrence
+        seen: set = set()
+        deduped: List[ExperimentConfiguration] = []
+        for c in configs:
+            marker = (self._condition_key(c), c.random_seed)
+            if marker in seen:
+                logger.warning(
+                    "Recommender proposed a duplicate config (seed=%d); dropping it",
+                    c.random_seed,
+                )
+                continue
+            seen.add(marker)
+            deduped.append(c)
+
+        # 2. top up short conditions
+        groups: Dict[Any, List[ExperimentConfiguration]] = {}
+        for c in deduped:
+            groups.setdefault(self._condition_key(c), []).append(c)
+
+        used_seeds = {c.random_seed for c in deduped}
+        next_seed = (max(used_seeds) if used_seeds else 41) + 1
+        out = list(deduped)
+        for group in groups.values():
+            seeds = {c.random_seed for c in group}
+            if len(seeds) >= _MIN_SEEDS_PER_CONDITION:
+                continue
+            template = group[0]
+            before = len(seeds)
+            while len(seeds) < _MIN_SEEDS_PER_CONDITION:
+                while next_seed in used_seeds:
+                    next_seed += 1
+                used_seeds.add(next_seed)
+                seeds.add(next_seed)
+                out.append(template.model_copy(update={"random_seed": next_seed}))
+                next_seed += 1
+            logger.info(
+                "Recommender: topped up a proposed condition from %d to %d distinct seeds",
+                before, _MIN_SEEDS_PER_CONDITION,
+            )
+        return out

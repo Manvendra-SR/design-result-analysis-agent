@@ -123,6 +123,10 @@ class SessionSummary(BaseModel):
     session_id: str = Field(description="UUID primary key")
     research_question: str = Field(description="Natural language research question")
     status: str = Field(description="'active' | 'concluded'")
+    run_phase: str = Field(
+        default="idle",
+        description="'idle' | 'running' | 'failed' - is a run-cycle actually in progress",
+    )
     cycle_count: int = Field(description="Number of completed adaptive cycles")
     experiment_count: int = Field(
         description="Total experiments stored for this session"

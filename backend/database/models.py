@@ -156,6 +156,21 @@ class SessionModel(Base):
             "'analyzing' | 'recommending' | 'concluded'"
         ),
     )
+    run_phase: str = Column(
+        String(16),
+        nullable=False,
+        default="idle",
+        comment=(
+            "Whether a run-cycle is actually in progress (distinct from "
+            "`status`). Set by executor.py. Values: 'idle' | 'running' | 'failed'"
+        ),
+    )
+    run_error: str | None = Column(
+        Text,
+        nullable=True,
+        default=None,
+        comment="Error text from the last failed run (run_phase='failed'); NULL otherwise",
+    )
     current_recommendation: str | None = Column(
         Text,
         nullable=True,

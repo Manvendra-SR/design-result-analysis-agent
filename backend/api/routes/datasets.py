@@ -3,9 +3,10 @@ backend/api/routes/datasets.py
 ================================
 Dataset ingestion + lookup.
 
-    POST /api/datasets           ingest a CSV (JSON body) -> DatasetProfile
-    GET  /api/datasets           list ingested datasets
-    GET  /api/datasets/{id}      one dataset's profile
+    POST   /api/datasets           ingest a CSV (JSON body) -> DatasetProfile
+    GET    /api/datasets           list ingested datasets
+    GET    /api/datasets/{id}      one dataset's profile
+    DELETE /api/datasets/{id}      delete a dataset (409 if in use; ?cascade=true)
 
 These three sit *outside* design.md's "7 endpoints" count, but the API is
 unusable without them: a session requires a ``dataset_id`` and Requirement 1
@@ -27,13 +28,13 @@ import os
 import tempfile
 from typing import List
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 
 from backend.api.dependencies import get_context
-from backend.api.schemas import DatasetIngestRequest
+from backend.api.schemas import DatasetIngestRequest, DeleteResult
 from backend.models.dataset import DatasetProfile
 from backend.state_machine.context import StateMachineContext
-from backend.tools.dataset.ingestion import ingest_csv
+from backend.tools.dataset.ingestion import delete_dataset_files, ingest_csv
 
 logger = logging.getLogger(__name__)
 
@@ -80,3 +81,35 @@ def get_dataset(
     ctx: StateMachineContext = Depends(get_context),
 ) -> DatasetProfile:
     return ctx.state_manager.get_dataset(dataset_id)  # KeyError -> 404
+
+
+@router.delete("/{dataset_id}", response_model=DeleteResult)
+def delete_dataset(
+    dataset_id: str,
+    cascade: bool = Query(
+        default=False,
+        description=(
+            "Also delete every investigation scoped to this dataset. Without "
+            "it, a dataset still referenced by any session returns 409."
+        ),
+    ),
+    ctx: StateMachineContext = Depends(get_context),
+) -> DeleteResult:
+    """Delete an ingested dataset (DB row + on-disk file).
+
+    409 if investigations still reference it, unless ``?cascade=true``.
+    """
+    sessions_deleted, experiments_deleted = ctx.state_manager.delete_dataset(
+        dataset_id, cascade=cascade
+    )  # KeyError -> 404, DatasetInUseError -> 409
+    delete_dataset_files(dataset_id)
+    logger.info(
+        "Deleted dataset %s (cascade=%s, sessions=%d)",
+        dataset_id, cascade, sessions_deleted,
+    )
+    return DeleteResult(
+        deleted="dataset",
+        id=dataset_id,
+        sessions_deleted=sessions_deleted,
+        experiments_deleted=experiments_deleted,
+    )

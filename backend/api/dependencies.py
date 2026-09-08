@@ -6,7 +6,7 @@ FastAPI dependency providers.
 ``get_context`` is a lazily-built singleton ``StateMachineContext`` (real
 ``StateManager`` + agents + tools). It is created on the first request that
 needs it, not at import time, so ``import backend.api.app`` works without a
-database or an Ollama server. Tests swap it out with
+database or Groq. Tests swap it out with
 ``app.dependency_overrides[get_context] = lambda: <stub context>``.
 """
 

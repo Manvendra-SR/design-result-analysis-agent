@@ -32,6 +32,8 @@ Requirements
 
 from __future__ import annotations
 
+import logging
+import shutil
 import uuid
 from pathlib import Path
 from typing import Optional
@@ -39,6 +41,8 @@ from typing import Optional
 import pandas as pd
 
 from backend.models.dataset import DatasetProfile, DatasetValidationError
+
+logger = logging.getLogger(__name__)
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 _UPLOADS_DIR = _PROJECT_ROOT / "data" / "uploads"
@@ -215,3 +219,20 @@ def ingest_csv(
         missing_value_counts=missing_value_counts,
         split_seed=_DEFAULT_SPLIT_SEED,
     )
+
+
+def delete_dataset_files(dataset_id: str) -> None:
+    """Remove the on-disk copy of an ingested dataset (``data/uploads/<id>/``).
+
+    Best-effort: a missing directory is fine, and any filesystem error is
+    logged rather than raised - the database row is the source of truth and
+    has already been deleted by the caller (``StateManager.delete_dataset``).
+    """
+    target = _UPLOADS_DIR / dataset_id
+    if not target.exists():
+        return
+    try:
+        shutil.rmtree(target)
+        logger.info("Deleted dataset files: %s", target)
+    except OSError as exc:  # noqa: BLE001 - best-effort cleanup
+        logger.warning("Could not delete dataset files at %s: %s", target, exc)
