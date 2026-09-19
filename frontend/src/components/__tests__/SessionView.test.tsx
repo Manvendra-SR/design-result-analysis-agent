@@ -4,7 +4,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SessionView } from "../SessionView";
 import { renderWithClient } from "../../test/utils";
 import { api } from "../../services/api";
-import { makeComparison, makeExperiment, makeSession } from "../../test/fixtures";
+import {
+  makeComparison,
+  makeCycle,
+  makeExperiment,
+  makeSession,
+} from "../../test/fixtures";
 
 vi.mock("../../services/api", () => ({
   apiErrorMessage: (e: unknown) => String(e),
@@ -38,15 +43,12 @@ beforeEach(() => {
   });
   m.getExperiments.mockResolvedValue([makeExperiment()]);
   m.getCycles.mockResolvedValue([
-    {
-      cycle_number: 1,
+    makeCycle({
       plan_explanation: "vary dropout",
       experiments: [makeExperiment()],
-      anomalies: [],
+      cumulative_experiment_count: 1,
       statistical_comparisons: [makeComparison()],
-      recommendation: null,
-      continued: false,
-    },
+    }),
   ]);
   m.getRecommendation.mockRejectedValue(new Error("404"));
 });

@@ -66,8 +66,12 @@ export const api = {
     http.get<SessionSummary[]>("/sessions").then((r) => r.data),
   getSession: (id: string) =>
     http.get<SessionDetail>(`/sessions/${id}`).then((r) => r.data),
-  createSession: (body: { research_question: string; dataset_id: string }) =>
-    http.post<CreateSessionResponse>("/sessions", body).then((r) => r.data),
+  createSession: (body: {
+    research_question: string;
+    dataset_id: string;
+    /** Provenance only — a follow-up starts with no evidence of its own. */
+    parent_session_id?: string;
+  }) => http.post<CreateSessionResponse>("/sessions", body).then((r) => r.data),
   deleteSession: (id: string) =>
     http.delete<DeleteResult>(`/sessions/${id}`).then((r) => r.data),
   runCycle: (id: string) =>

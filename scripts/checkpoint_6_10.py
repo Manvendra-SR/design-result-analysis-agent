@@ -27,6 +27,12 @@ Live (only if GROQ_API_KEY is set): one real autonomous investigation via the AP
 """
 
 import sys
+
+# LLM prose routinely contains non-ASCII punctuation (non-breaking hyphens,
+# curly quotes). Windows consoles default to cp1252 and raise
+# UnicodeEncodeError on those, which would abort a checkpoint mid-report.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 import tempfile
 from pathlib import Path
 
@@ -98,7 +104,7 @@ class _StubPlanner:
 class _StubRecommender:
     calls = 0
 
-    def recommend_next(self, question, experiments, statistical_results, anomalies):
+    def recommend_next(self, question, experiments, statistical_results, anomalies, **_kw):
         _StubRecommender.calls += 1
         if _StubRecommender.calls >= 2:
             return Recommendation(action="conclude", recommended_experiments=[],
@@ -164,26 +170,38 @@ assert r.json()["recommendation"]["action"] == "conclude"  # the FINAL one
 print(f"[OK] 5. POST /run-cycle -> {r.json()['cycles_completed']} cycles autonomously, "
       f"status={r.json()['status']}, experiments={r.json()['experiments_completed']}")
 
-# 5b. cycle-by-cycle history is exposed - structure and wiring, not content.
-#     (statistical_comparisons may be empty on a cycle whose real training
-#      converged to zero accuracy variance - the analysis node skips
-#      zero-variance pairs by design; content is unit-tested with a
-#      variance-injecting stub runner in test_api_cycles.py.)
+# 5b. cycle-by-cycle history is exposed, with per-cycle and cumulative scopes
+#     kept apart. `experiments` / `anomalies_detected` / `anomalies_resolved`
+#     are THIS cycle's; `statistical_comparisons` / `condition_summaries` /
+#     `recommendation` / `open_anomaly_count` are cumulative through it.
+#     A pair that cannot be compared is recorded in `skipped_comparisons`
+#     with its reason, never silently dropped.
 cycles = client.get(f"/api/sessions/{session_id}/cycles").json()
 assert [c["cycle_number"] for c in cycles] == [1, 2]
 assert cycles[0]["recommendation"]["action"] == "run_more_experiments" and cycles[0]["continued"] is True
 assert cycles[1]["recommendation"]["action"] == "conclude" and cycles[1]["continued"] is False
+assert cycles[1]["termination_reason"] == "agent_concluded"
 assert cycles[0]["plan_explanation"] and cycles[1]["plan_explanation"] is None
+_cum = 0
 for c in cycles:
+    _cum += len(c["experiments"])
     assert c["experiments"] and c["recommendation"]
-    assert isinstance(c["statistical_comparisons"], list)
     assert {e["cycle"] for e in c["experiments"]} == {c["cycle_number"]}
+    assert c["cumulative_experiment_count"] == _cum
+    # every pair is either compared or explained - never silently missing
+    assert isinstance(c["statistical_comparisons"], list)
+    assert isinstance(c["skipped_comparisons"], list)
+    assert c["condition_summaries"], "analysis must describe every condition"
+    for _s in c["skipped_comparisons"]:
+        assert _s["reason_code"] in ("insufficient_data", "insufficient_variance")
+        assert _s["reason"]
 _summary = [
-    (c["cycle_number"], c["recommendation"]["action"],
-     len(c["experiments"]), len(c["statistical_comparisons"]))
+    (c["cycle_number"], c["recommendation"]["action"], len(c["experiments"]),
+     c["cumulative_experiment_count"], len(c["statistical_comparisons"]),
+     len(c["skipped_comparisons"]))
     for c in cycles
 ]
-print(f"[OK] 5b. GET /cycles -> per-cycle history (cycle, action, #exp, #stat): {_summary}")
+print(f"[OK] 5b. GET /cycles -> (cycle, action, #exp, #cum, #stat, #skipped): {_summary}")
 
 # 6. experiments (all cycles, tagged)
 exps = client.get(f"/api/sessions/{session_id}/experiments").json()

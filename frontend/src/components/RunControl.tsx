@@ -1,4 +1,4 @@
-import { isUnstarted, type RunState } from "../lib/runState";
+import { isFinished, isUnstarted, type RunState } from "../lib/runState";
 import { apiErrorMessage } from "../services/api";
 import type { SessionDetail } from "../types/api";
 import { Badge, Card, ErrorBox, Spinner } from "./ui";
@@ -12,10 +12,13 @@ import { Badge, Card, ErrorBox, Spinner } from "./ui";
  * The button, banner and error shown depend on `runState` (derived from the
  * backend's `run_phase` + the local mutation), NOT on `session.status`:
  *
- *   idle       -> "Run"/"Resume" button, no banner
- *   running    -> disabled button + "running" banner
- *   failed     -> the persisted error + a "Resume" button
- *   concluded  -> a completion message, no button
+ *   idle             -> "Run"/"Resume" button, no banner
+ *   running          -> disabled button + "running" banner
+ *   failed           -> the persisted error + a "Resume" button
+ *   concluded        -> a completion message, no button
+ *   stopped_at_limit -> finished but UNRESOLVED: the safety cap stopped a loop
+ *                       that wanted more experiments. Shown as a warning, not
+ *                       a success, and points at the follow-up path.
  */
 export function RunControl({
   session,
@@ -40,11 +43,19 @@ export function RunControl({
       badge={<Badge variant="gradient">Control</Badge>}
       hint="One run executes every adaptive cycle server-side until the Recommender concludes or the safety cap is reached."
     >
-      {runState === "concluded" ? (
-        <div className="concluded-banner" role="status">
-          <span aria-hidden="true">✓</span>
-          <span>Investigation complete — no further runs needed.</span>
-        </div>
+      {isFinished(runState) ? (
+        runState === "stopped_at_limit" ? (
+          <div className="error-box" role="status">
+            Stopped at the {session.max_cycles}-cycle safety limit — the agent
+            still wanted more experiments, so this investigation is finished but
+            unresolved. Ask a follow-up question below to keep going.
+          </div>
+        ) : (
+          <div className="concluded-banner" role="status">
+            <span aria-hidden="true">✓</span>
+            <span>Investigation complete — no further runs needed.</span>
+          </div>
+        )
       ) : (
         <>
           {runState === "failed" && failureMessage && (

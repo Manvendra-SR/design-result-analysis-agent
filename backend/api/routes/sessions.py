@@ -37,6 +37,7 @@ from typing import Dict, List
 from fastapi import APIRouter, Depends, HTTPException
 
 from backend.api.dependencies import get_context
+from backend.config import MAX_ADAPTIVE_CYCLES
 from backend.api.schemas import (
     CreateSessionRequest,
     CreateSessionResponse,
@@ -61,7 +62,13 @@ def create_session(
 ) -> CreateSessionResponse:
     sm = ctx.state_manager
     sm.get_dataset(body.dataset_id)  # KeyError -> 404 if the dataset does not exist
-    session_id = sm.create_session(body.research_question, body.dataset_id)
+    if body.parent_session_id:
+        sm.get_session(body.parent_session_id)  # KeyError -> 404
+    session_id = sm.create_session(
+        body.research_question,
+        body.dataset_id,
+        parent_session_id=body.parent_session_id,
+    )
     session = sm.get_session(session_id)
     return CreateSessionResponse(session_id=session_id, created_at=session.created_at)
 
@@ -84,13 +91,16 @@ def get_session(
     return SessionDetailResponse(
         session_id=session.session_id,
         dataset_id=session.dataset_id,
+        parent_session_id=session.parent_session_id,
         research_question=session.research_question,
         status=session.status,
         current_node=session.current_node,
         run_phase=session.run_phase,
         run_error=session.run_error,
+        termination_reason=session.termination_reason,
         cycle_count=session.cycle_count,
         experiment_count=experiment_count,
+        max_cycles=MAX_ADAPTIVE_CYCLES,
         plan_explanation=session.plan_explanation,
         created_at=session.created_at,
         updated_at=session.updated_at,
@@ -141,11 +151,21 @@ def get_cycles(
 ) -> List[SessionCycle]:
     """The cycle-by-cycle investigation history.
 
-    One entry per adaptive cycle, each combining what actually ran
-    (experiments, anomalies) with what the agent decided (statistical
-    comparisons, recommendation, whether it continued). Built by joining
-    ``sessions.cycle_history`` with the ``experiments`` (grouped by
-    ``experiments.cycle``) and ``anomalies`` rows.
+    One entry per adaptive cycle. Each mixes two scopes, and they are kept
+    strictly apart (see ``backend/models/cycle.py``):
+
+    *Per-cycle* - ``experiments``, ``anomalies_detected``,
+    ``anomalies_resolved``: what THIS cycle did, from the ``experiments`` and
+    ``anomalies`` rows.
+
+    *Cumulative* - ``statistical_comparisons``, ``condition_summaries``,
+    ``recommendation``, ``open_anomaly_count``: the state of the whole
+    investigation as of this cycle, from ``sessions.cycle_history``.
+
+    Anomaly flags are attributed by the cycle that raised or withdrew them
+    (``detected_cycle`` / ``resolved_cycle``), not by the cycle their
+    experiment happened to run in - a flag raised in cycle 2 against a cycle-1
+    experiment belongs to cycle 2's work.
     """
     sm = ctx.state_manager
     session = sm.get_session(session_id)  # KeyError -> 404
@@ -154,15 +174,16 @@ def get_cycles(
     experiments = sm.query_experiments(session_id)
     anomalies = sm.query_anomalies(session_id=session_id)
 
-    exp_cycle: Dict[str, int] = {
-        e.experiment_id: (e.cycle or 0) for e in experiments
-    }
     exps_by_cycle: Dict[int, list] = {}
     for e in experiments:
         exps_by_cycle.setdefault(e.cycle or 0, []).append(e)
-    anoms_by_cycle: Dict[int, list] = {}
+
+    detected_by_cycle: Dict[int, list] = {}
+    resolved_by_cycle: Dict[int, list] = {}
     for a in anomalies:
-        anoms_by_cycle.setdefault(exp_cycle.get(a.experiment_id, 0), []).append(a)
+        detected_by_cycle.setdefault(a.detected_cycle or 0, []).append(a)
+        if a.resolved_cycle is not None:
+            resolved_by_cycle.setdefault(a.resolved_cycle, []).append(a)
 
     history_by_cycle = {h.cycle_number: h for h in history}
     cycle_numbers = sorted(
@@ -170,19 +191,37 @@ def get_cycles(
     )
 
     out: List[SessionCycle] = []
+    cumulative_experiments = 0
     for n in cycle_numbers:
         entry = history_by_cycle.get(n)
+        this_cycle = exps_by_cycle.get(n, [])
+        cumulative_experiments += len(this_cycle)
+        # Flags raised on or before cycle n and not yet withdrawn by then.
+        open_at_end = sum(
+            1
+            for a in anomalies
+            if (a.detected_cycle or 0) <= n
+            and (a.resolved_cycle is None or a.resolved_cycle > n)
+        )
         out.append(
             SessionCycle(
                 cycle_number=n,
                 plan_explanation=session.plan_explanation if n == 1 else None,
-                experiments=exps_by_cycle.get(n, []),
-                anomalies=anoms_by_cycle.get(n, []),
+                experiments=this_cycle,
+                anomalies_detected=detected_by_cycle.get(n, []),
+                anomalies_resolved=resolved_by_cycle.get(n, []),
+                cumulative_experiment_count=cumulative_experiments,
+                open_anomaly_count=open_at_end,
                 statistical_comparisons=entry.statistical_comparisons if entry else [],
+                skipped_comparisons=entry.skipped_comparisons if entry else [],
+                condition_summaries=entry.condition_summaries if entry else [],
                 recommendation=entry.recommendation if entry else None,
                 continued=bool(
-                    entry and entry.recommendation.action == "run_more_experiments"
+                    entry
+                    and entry.termination_reason is None
+                    and entry.recommendation.action == "run_more_experiments"
                 ),
+                termination_reason=entry.termination_reason if entry else None,
             )
         )
     return out
@@ -193,8 +232,15 @@ def get_recommendation(
     session_id: str,
     ctx: StateMachineContext = Depends(get_context),
 ) -> Recommendation:
-    """The FINAL recommendation - what the agent concluded. For the reasoning
-    of every intermediate cycle, use ``GET /cycles``."""
+    """The FINAL recommendation, exactly as the agent produced it.
+
+    Note that ``action`` may still be ``run_more_experiments`` on a concluded
+    session: that means the ``MAX_ADAPTIVE_CYCLES`` cap stopped the loop while
+    the agent still wanted more evidence. Read
+    ``GET /sessions/{id}.termination_reason`` alongside this and present the
+    two cases differently - a capped run is not a settled answer. For the
+    reasoning of every intermediate cycle, use ``GET /cycles``.
+    """
     sm = ctx.state_manager
     sm.get_session(session_id)  # KeyError -> 404 if the session does not exist
     recommendation = sm.get_recommendation(session_id)

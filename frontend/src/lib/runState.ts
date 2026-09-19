@@ -9,7 +9,23 @@
  */
 import type { SessionDetail } from "../types/api";
 
-export type RunState = "concluded" | "running" | "failed" | "idle";
+/**
+ * `concluded` — the agent judged the evidence sufficient.
+ * `stopped_at_limit` — the MAX_ADAPTIVE_CYCLES cap stopped a loop that still
+ * wanted more experiments. It is finished, but it is NOT a settled answer, and
+ * the UI must not present it as one.
+ */
+export type RunState =
+  | "concluded"
+  | "stopped_at_limit"
+  | "running"
+  | "failed"
+  | "idle";
+
+/** Both terminal states: the investigation will not run again. */
+export function isFinished(state: RunState): boolean {
+  return state === "concluded" || state === "stopped_at_limit";
+}
 
 export interface MutationLike {
   isPending: boolean;
@@ -21,7 +37,9 @@ export function deriveRunState(
   runMutation: MutationLike,
 ): RunState {
   if (session.status === "concluded" || session.current_node === "concluded") {
-    return "concluded";
+    return session.termination_reason === "cycle_limit"
+      ? "stopped_at_limit"
+      : "concluded";
   }
   // isPending = this tab is running it; run_phase = the backend says a run is
   // in progress (covers a run started elsewhere, or a page refresh mid-run).

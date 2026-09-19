@@ -226,9 +226,13 @@ def test_analyzing_stores_pairwise_comparisons(state_manager) -> None:
     result = nodes.analyzing(_state(sid, "analyzing"))
 
     assert result == {"current_node": "recommending"}
-    comparisons = state_manager.load_analysis(sid)
-    assert len(comparisons) == 1  # 2 dropout conditions -> 1 pairwise comparison
-    assert comparisons[0].metric == "accuracy"
+    analysis = state_manager.load_analysis(sid)
+    assert len(analysis.comparisons) == 1  # 2 dropout conditions -> 1 pair
+    assert analysis.comparisons[0].metric == "accuracy"
+    # Per-condition summaries travel with the comparisons so the recommender
+    # never has to count replicates itself.
+    assert len(analysis.condition_summaries) == 2
+    assert {s.n_successful for s in analysis.condition_summaries} == {4}
 
 
 def test_analyzing_uses_val_loss_metric_for_regression(state_manager) -> None:
@@ -240,8 +244,8 @@ def test_analyzing_uses_val_loss_metric_for_regression(state_manager) -> None:
 
     nodes.analyzing(_state(sid, "analyzing"))
 
-    comparisons = state_manager.load_analysis(sid)
-    assert comparisons and comparisons[0].metric == "val_loss"
+    analysis = state_manager.load_analysis(sid)
+    assert analysis.comparisons and analysis.comparisons[0].metric == "val_loss"
 
 
 # ---------------------------------------------------------------------------
@@ -295,13 +299,21 @@ def test_recommending_passes_precomputed_stats_to_agent(state_manager) -> None:
     nodes.recommending(_state(sid, "recommending"))
 
     call = recommender.received[-1]
-    # The node hands the agent the StatisticalComparison objects the analysis
-    # node already computed - the agent never sees raw metrics to crunch.
-    from backend.models.statistics import StatisticalComparison
+    # The node hands the agent the analysis the analysis node already computed -
+    # the agent never sees raw metrics to crunch.
+    from backend.config import MAX_ADAPTIVE_CYCLES
+    from backend.models.statistics import AnalysisSnapshot, StatisticalComparison
 
-    assert call["statistical_results"]
-    assert all(isinstance(s, StatisticalComparison) for s in call["statistical_results"])
+    analysis = call["statistical_results"]
+    assert isinstance(analysis, AnalysisSnapshot)
+    assert analysis.comparisons
+    assert all(isinstance(s, StatisticalComparison) for s in analysis.comparisons)
+    assert analysis.condition_summaries
     assert all(isinstance(e, ExperimentResult) for e in call["experiments"])
+    # ...and where it is in the cycle budget, so the last cycle can conclude
+    # deliberately rather than being cut off by the cap.
+    assert call["current_cycle"] == 1
+    assert call["max_cycles"] == MAX_ADAPTIVE_CYCLES
 
 
 def test_recommending_records_a_cycle_history_entry(state_manager) -> None:
@@ -319,7 +331,17 @@ def test_recommending_records_a_cycle_history_entry(state_manager) -> None:
     assert history[0].statistical_comparisons
 
 
-def test_recommending_safety_cap_forces_conclude(state_manager) -> None:
+def test_recommending_safety_cap_stops_without_rewriting_the_recommendation(
+    state_manager,
+) -> None:
+    """The cap stops the loop; it does not fabricate a conclusion.
+
+    Rewriting ``action`` to "conclude" while leaving an explanation that argues
+    for MORE experiments produced a final screen that contradicted itself. The
+    agent's output is now stored verbatim and the stop is recorded separately
+    in ``termination_reason``, so the UI can say "stopped at the limit" rather
+    than "concluded".
+    """
     from backend.config import MAX_ADAPTIVE_CYCLES
     from tests._fakes import always_run_more
 
@@ -336,6 +358,24 @@ def test_recommending_safety_cap_forces_conclude(state_manager) -> None:
     session = state_manager.get_session(sid)
     assert session.status == "concluded"
     assert session.cycle_count == MAX_ADAPTIVE_CYCLES
+    assert session.termination_reason == "cycle_limit"
+
+    # The agent still wanted more experiments, and that is recorded honestly.
     rec = state_manager.get_recommendation(sid)
-    assert rec.action == "conclude"
-    assert "safety limit" in rec.evidence_summary
+    assert rec.action == "run_more_experiments"
+    history = state_manager.get_cycle_history(sid)
+    assert history[-1].termination_reason == "cycle_limit"
+    assert history[-1].recommendation.action == "run_more_experiments"
+
+
+def test_recommending_agent_conclusion_is_recorded_as_such(state_manager) -> None:
+    sid = _seed(state_manager)
+    ctx = build_context(state_manager, recommender=StubRecommender())
+    nodes = _advance_to_recommending(ctx, sid)
+
+    result = nodes.recommending(_state(sid, "recommending"))
+
+    assert result == {"current_node": "concluded"}
+    session = state_manager.get_session(sid)
+    assert session.termination_reason == "agent_concluded"
+    assert state_manager.get_recommendation(sid).action == "conclude"

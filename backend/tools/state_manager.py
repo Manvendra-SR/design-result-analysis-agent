@@ -112,7 +112,7 @@ from backend.models.cycle import CycleHistoryEntry
 from backend.models.dataset import DatasetInUseError, DatasetProfile
 from backend.models.experiment import ExperimentConfiguration, ExperimentResult
 from backend.models.recommendation import Recommendation, SessionSummary
-from backend.models.statistics import StatisticalComparison
+from backend.models.statistics import AnalysisSnapshot, StatisticalComparison
 
 logger = logging.getLogger(__name__)
 
@@ -169,6 +169,8 @@ class StateManager:
             research_question=row.research_question,
             status=row.status,
             run_phase=row.run_phase,
+            termination_reason=row.termination_reason,
+            parent_session_id=row.parent_session_id,
             cycle_count=row.cycle_count,
             experiment_count=experiment_count,
             created_at=row.created_at,
@@ -215,6 +217,8 @@ class StateManager:
             rule=row.rule,  # type: ignore[arg-type]
             explanation=row.explanation,
             severity=row.severity,  # type: ignore[arg-type]
+            detected_cycle=row.detected_cycle,
+            resolved_cycle=row.resolved_cycle,
             detected_at=row.detected_at,
         )
 
@@ -337,7 +341,12 @@ class StateManager:
     # ------------------------------------------------------------------
 
     @_retry_db
-    def create_session(self, research_question: str, dataset_id: str) -> str:
+    def create_session(
+        self,
+        research_question: str,
+        dataset_id: str,
+        parent_session_id: Optional[str] = None,
+    ) -> str:
         """Create a new research session scoped to a dataset, and return its session_id.
 
         Parameters
@@ -347,6 +356,13 @@ class StateManager:
         dataset_id:
             UUID of the dataset this session investigates. Every experiment
             run within this session references this same dataset.
+        parent_session_id:
+            The investigation this one follows up on, if any. **Provenance
+            only** - the new session starts with no experiments, no anomalies
+            and no cycle history of its own, because every query in this class
+            is scoped by ``session_id``. That is deliberate: a follow-up
+            question must never inherit evidence gathered to answer a
+            different question.
 
         Returns
         -------
@@ -355,7 +371,11 @@ class StateManager:
 
         Requirements: 1.7, 8.1, 8.4
         """
-        row = SessionModel(research_question=research_question, dataset_id=dataset_id)
+        row = SessionModel(
+            research_question=research_question,
+            dataset_id=dataset_id,
+            parent_session_id=parent_session_id,
+        )
         with self._Session() as db:
             db.add(row)
             db.commit()
@@ -447,6 +467,14 @@ class StateManager:
             if row is None:
                 raise KeyError(f"Session not found: {session_id!r}")
             experiments_deleted = len(row.experiments)
+            # Detach any follow-up investigations first. PostgreSQL would do
+            # this via ON DELETE SET NULL, but SQLite (unit tests) does not
+            # enforce foreign keys by default - doing it explicitly keeps the
+            # behaviour identical on both, and follow-ups are independent
+            # investigations that must survive their parent's deletion.
+            db.query(SessionModel).filter(
+                SessionModel.parent_session_id == session_id
+            ).update({SessionModel.parent_session_id: None})
             db.delete(row)
             db.commit()
         logger.info(
@@ -455,8 +483,13 @@ class StateManager:
         return experiments_deleted
 
     @_retry_db
-    def update_session_status(self, session_id: str, status: str) -> None:
-        """Update the status of a session.
+    def update_session_status(
+        self,
+        session_id: str,
+        status: str,
+        termination_reason: Optional[str] = None,
+    ) -> None:
+        """Update the status of a session, and why it stopped.
 
         Parameters
         ----------
@@ -464,6 +497,12 @@ class StateManager:
             UUID of the session to update.
         status:
             New status string: ``"active"`` or ``"concluded"``.
+        termination_reason:
+            ``"agent_concluded"`` (the Recommender judged the evidence
+            sufficient) or ``"cycle_limit"`` (the safety cap stopped a loop
+            that still wanted to continue). Recorded separately from the
+            recommendation itself so a capped run is never presented as a
+            settled answer. Ignored when None.
 
         Raises
         ------
@@ -477,8 +516,13 @@ class StateManager:
             if row is None:
                 raise KeyError(f"Session not found: {session_id!r}")
             row.status = status
+            if termination_reason is not None:
+                row.termination_reason = termination_reason
             db.commit()
-        logger.info("Session %s status -> %s", session_id, status)
+        logger.info(
+            "Session %s status -> %s (termination_reason=%s)",
+            session_id, status, termination_reason,
+        )
 
     @_retry_db
     def set_run_phase(
@@ -688,6 +732,8 @@ class StateManager:
             rule=anomaly.rule,
             explanation=anomaly.explanation,
             severity=anomaly.severity,
+            detected_cycle=anomaly.detected_cycle,
+            resolved_cycle=anomaly.resolved_cycle,
             detected_at=anomaly.detected_at,
         )
         with self._Session() as db:
@@ -696,6 +742,32 @@ class StateManager:
         logger.debug(
             "Anomaly stored: %s (rule=%s, experiment=%s)",
             anomaly.anomaly_id, anomaly.rule, anomaly.experiment_id,
+        )
+
+    @_retry_db
+    def set_anomaly_resolution(
+        self, anomaly_id: str, resolved_cycle: Optional[int]
+    ) -> None:
+        """Close or re-open an anomaly flag.
+
+        ``resolved_cycle=<n>`` withdraws the flag (recording which cycle's
+        validation node withdrew it); ``None`` re-opens it. Rows are never
+        deleted, so the history of what was flagged and when it cleared stays
+        queryable - see ``AnomalyReport.is_open``.
+
+        Raises
+        ------
+        KeyError
+            If the anomaly does not exist.
+        """
+        with self._Session() as db:
+            row = db.get(AnomalyModel, anomaly_id)
+            if row is None:
+                raise KeyError(f"Anomaly not found: {anomaly_id!r}")
+            row.resolved_cycle = resolved_cycle
+            db.commit()
+        logger.debug(
+            "Anomaly %s resolved_cycle -> %s", anomaly_id, resolved_cycle
         )
 
     @_retry_db
@@ -788,28 +860,42 @@ class StateManager:
         return [ExperimentConfiguration.model_validate(c) for c in json.loads(raw)]
 
     @_retry_db
-    def save_analysis(
-        self, session_id: str, comparisons: List[StatisticalComparison]
-    ) -> None:
-        """Persist the analysis node's statistical comparisons for the recommender."""
-        payload = json.dumps([c.model_dump(mode="json") for c in comparisons])
+    def save_analysis(self, session_id: str, analysis: AnalysisSnapshot) -> None:
+        """Persist the analysis node's output for the recommendation node.
+
+        Stores comparisons, the pairs that could NOT be compared (with the
+        reason), and per-condition descriptive statistics - the recommender
+        needs all three to reason honestly about the evidence.
+        """
         with self._Session() as db:
             row = self._get_session_or_raise(db, session_id)
-            row.latest_analysis = payload
+            row.latest_analysis = analysis.model_dump_json()
             db.commit()
         logger.debug(
-            "Session %s latest_analysis <- %d comparison(s)", session_id, len(comparisons)
+            "Session %s latest_analysis <- %d comparison(s), %d skipped, %d condition(s)",
+            session_id,
+            len(analysis.comparisons),
+            len(analysis.skipped),
+            len(analysis.condition_summaries),
         )
 
     @_retry_db
-    def load_analysis(self, session_id: str) -> List[StatisticalComparison]:
-        """Return the last analysis node's comparisons (empty list if none)."""
+    def load_analysis(self, session_id: str) -> AnalysisSnapshot:
+        """Return the last analysis node's output (an empty snapshot if none)."""
         with self._Session() as db:
             row = self._get_session_or_raise(db, session_id)
             raw = row.latest_analysis
         if not raw:
-            return []
-        return [StatisticalComparison.model_validate(c) for c in json.loads(raw)]
+            return AnalysisSnapshot()
+        parsed = json.loads(raw)
+        if isinstance(parsed, list):
+            # Legacy shape: a bare list of comparisons, written before skips and
+            # condition summaries existed. Read it rather than crashing on a
+            # session that predates the change.
+            return AnalysisSnapshot(
+                comparisons=[StatisticalComparison.model_validate(c) for c in parsed]
+            )
+        return AnalysisSnapshot.model_validate(parsed)
 
     @_retry_db
     def save_recommendation(self, session_id: str, recommendation: Recommendation) -> None:

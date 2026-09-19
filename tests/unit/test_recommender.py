@@ -20,6 +20,8 @@ Test cases (task 4.10)
 9.  test_conclude_ignores_any_recommended_experiments
 10. test_precomputed_statistics_are_passed_into_the_prompt_verbatim
 11. test_statistics_accepted_as_a_plain_sequence
+12. test_controlled_comparison_guidance_reaches_the_model
+13. test_multi_parameter_recommendation_is_still_accepted
 """
 
 from __future__ import annotations
@@ -152,10 +154,43 @@ def test_run_more_experiments_parses_recommended_configs() -> None:
 
     assert rec.action == "run_more_experiments"
     # The LLM proposed one config (dropout=0.1, seed=7); seed repair tops the
-    # single proposed condition up to 3 distinct seeds.
+    # single proposed condition up to 3 replicates on MATCHED seeds. The
+    # proposed seed value (7) is deliberately discarded: replicates are
+    # numbered 1, 2, 3 in every condition so conditions are compared on the
+    # same draws (see models/condition.assign_matched_seeds).
     assert {c.hyperparameters["dropout"] for c in rec.recommended_experiments} == {0.1}
-    assert len({c.random_seed for c in rec.recommended_experiments}) >= 3
-    assert 7 in {c.random_seed for c in rec.recommended_experiments}
+    assert sorted(c.random_seed for c in rec.recommended_experiments) == [1, 2, 3]
+
+
+def test_more_replicates_of_an_existing_condition_continue_its_seeds() -> None:
+    # dropout=0.0 has already been run with seeds 0-4 (_EXPERIMENTS), so asking
+    # for more of it must extend the sequence rather than repeat those runs.
+    payload = json.dumps(
+        {
+            "action": "run_more_experiments",
+            "recommended_experiments": [
+                {
+                    "dataset_id": "ds-1",
+                    "model_type": "mlp",
+                    "hyperparameters": {
+                        "dropout": 0.0,
+                        "learning_rate": 0.001,
+                        "batch_size": 32,
+                    },
+                    "preprocessing": {"normalize": False},
+                    "random_seed": 7,
+                }
+            ],
+            "explanation": "more replicates of dropout=0.0",
+            "evidence_summary": "variance still high",
+        }
+    )
+    agent = RecommenderAgent(llm_client=_StubLLM(payload))
+
+    rec = agent.recommend_next("Does dropout help?", _EXPERIMENTS, {}, [])
+
+    seeds = sorted(c.random_seed for c in rec.recommended_experiments)
+    assert seeds == [5, 6, 7]  # 0-4 are already on record
 
 
 def test_recommended_config_dataset_id_is_forced() -> None:
@@ -309,3 +344,88 @@ def test_statistics_accepted_as_a_plain_sequence() -> None:
 
     rec = agent.recommend_next("Does dropout help?", _EXPERIMENTS, [_comparison()], [])
     assert rec.action == "conclude"
+
+
+# ---------------------------------------------------------------------------
+# 12-13. Controlled comparisons: guidance in the prompt, freedom in the code
+# ---------------------------------------------------------------------------
+
+def test_controlled_comparison_guidance_reaches_the_model() -> None:
+    """The agent is *asked* to hold the other parameters fixed.
+
+    The Planner has carried a "vary one factor at a time" rule since Phase 4;
+    the Recommender was never given one, and a real investigation answered
+    "does an MLP beat a linear baseline?" by switching to a different MLP
+    (dropout, epochs, hidden_size and normalize all changed at once) and never
+    re-running the baseline. The rule lives in the prompt, so this asserts the
+    prompt actually carries it.
+    """
+    stub = _StubLLM(_conclude_json())
+    agent = RecommenderAgent(llm_client=stub)
+
+    agent.recommend_next("Does dropout help?", _EXPERIMENTS, {}, [])
+
+    system_prompt = stub.calls[0][0]["content"]
+    assert "CONTROLLED COMPARISONS" in system_prompt
+    # ...carry the established configuration forward rather than re-inventing it
+    assert "hold the other" in system_prompt
+    # ...an omitted hyperparameter is a different configuration, not "unchanged"
+    assert "a key you leave out" in system_prompt
+    # ...multi-parameter changes stay allowed, but must be explained
+    assert "You MAY change more than one parameter" in system_prompt
+    assert "name every parameter you" in system_prompt
+
+
+def test_multi_parameter_recommendation_is_still_accepted() -> None:
+    """Guidance, not a machine rule: a config that moves several parameters at
+    once is passed through untouched.
+
+    Deciding which of several changed keys is "the factor" is ambiguous, and a
+    diff-based rejection would block the legitimate case (a learning rate that
+    no longer suits a much larger hidden layer). The agent keeps that freedom -
+    only seeds and dataset_id are code-owned.
+    """
+    payload = json.dumps(
+        {
+            "action": "run_more_experiments",
+            "recommended_experiments": [
+                {
+                    "dataset_id": "ds-1",
+                    "model_type": "mlp",
+                    # every field differs from _EXPERIMENTS' conditions
+                    "hyperparameters": {
+                        "dropout": 0.3,
+                        "learning_rate": 0.01,
+                        "batch_size": 64,
+                        "hidden_size": 256,
+                        "epochs": 5,
+                    },
+                    "preprocessing": {"normalize": True},
+                    "random_seed": 7,
+                }
+            ],
+            "explanation": (
+                "Raising hidden_size to 256 needs a larger learning rate and "
+                "batch size to train in comparable time; normalize is enabled "
+                "because the wider layer is sensitive to feature scale."
+            ),
+            "evidence_summary": "dropout alone has not separated the conditions",
+        }
+    )
+    agent = RecommenderAgent(llm_client=_StubLLM(payload))
+
+    rec = agent.recommend_next("Does dropout help?", _EXPERIMENTS, {}, [])
+
+    assert rec.action == "run_more_experiments"
+    assert len(rec.recommended_experiments) == 3  # one condition, 3 matched seeds
+    for cfg in rec.recommended_experiments:
+        assert cfg.hyperparameters == {
+            "dropout": 0.3,
+            "learning_rate": 0.01,
+            "batch_size": 64,
+            "hidden_size": 256,
+            "epochs": 5,
+        }
+        assert cfg.preprocessing.normalize is True
+    # The agent's stated reason survives verbatim for the UI and the history.
+    assert "larger learning rate" in rec.explanation

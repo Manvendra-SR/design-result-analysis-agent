@@ -32,6 +32,12 @@ Live check (only if GROQ_API_KEY is set)
 
 import logging
 import sys
+
+# LLM prose routinely contains non-ASCII punctuation (non-breaking hyphens,
+# curly quotes). Windows consoles default to cp1252 and raise
+# UnicodeEncodeError on those, which would abort a checkpoint mid-report.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 import tempfile
 from pathlib import Path
 
@@ -103,7 +109,7 @@ class _StubRecommender:
     def __init__(self):
         self.calls = 0
 
-    def recommend_next(self, question, experiments, statistical_results, anomalies):
+    def recommend_next(self, question, experiments, statistical_results, anomalies, **_kw):
         self.calls += 1
         if self.calls >= 2:
             return Recommendation(action="conclude", recommended_experiments=[],
@@ -194,7 +200,7 @@ print(f"[OK] 4. crash recovery: resumed from 'validating', looped to conclusion 
 from backend.config import MAX_ADAPTIVE_CYCLES
 
 class _NeverConcludes:
-    def recommend_next(self, question, experiments, statistical_results, anomalies):
+    def recommend_next(self, question, experiments, statistical_results, anomalies, **_kw):
         return Recommendation(
             action="run_more_experiments", explanation="keep going", evidence_summary="never done",
             recommended_experiments=[
@@ -209,9 +215,14 @@ sm3.create_dataset(profile)
 sid3 = sm3.create_session("q", profile.dataset_id)
 capped = execute_cycle(sid3, _offline_context(sm3, recommender=_NeverConcludes()))
 assert capped.status == "concluded" and capped.cycles_completed == MAX_ADAPTIVE_CYCLES
-assert "safety limit" in capped.recommendation.evidence_summary
+# The cap STOPS the loop; it does not fabricate a conclusion. The agent's own
+# recommendation is stored verbatim (still "run_more_experiments") and the stop
+# is recorded separately, so the UI never presents a capped run as an answer.
+assert capped.termination_reason == "cycle_limit"
+assert capped.recommendation.action == "run_more_experiments"
 print(f"[OK] 5. safety cap: never-concluding recommender stopped at "
-      f"{MAX_ADAPTIVE_CYCLES} cycles with a 'reached the ...-cycle safety limit' note")
+      f"{MAX_ADAPTIVE_CYCLES} cycles, termination_reason='cycle_limit', "
+      f"agent's action preserved as '{capped.recommendation.action}'")
 
 # ---------------------------------------------------------------------------
 # 5b. Concluded session is rejected

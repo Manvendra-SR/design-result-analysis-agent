@@ -21,31 +21,38 @@ planning     -> plan_experiments(question, profile); queue configs; save the
                 plan rationale                                             -> executing
 executing    -> run each queued config, tagging results with the current
                 cycle number; store them; clear the queue                  -> validating
-validating   -> detect anomalies on successful experiments; flag them       -> analyzing
-analyzing    -> pairwise t-tests between configuration groups; store them    -> recommending
+validating   -> RE-EVALUATE anomalies across every completed experiment and
+                reconcile against the stored flags (raise / withdraw /
+                re-open); sync experiment statuses                          -> analyzing
+analyzing    -> pairwise comparisons between conditions + per-condition
+                summaries; every skipped pair recorded with its reason       -> recommending
 recommending -> recommend_next(...); append a per-cycle history entry;
-                (safety cap: force conclude at MAX_ADAPTIVE_CYCLES);
-                branch on action:
-                  conclude            -> mark session concluded             -> concluded
-                  run_more_experiments -> queue the recommended configs      -> executing
-                                          (the graph then loops back here)
+                branch on the agent's action, with the MAX_ADAPTIVE_CYCLES
+                cap as a separate, recorded stop:
+                  conclude             -> concluded (termination: agent_concluded)
+                  run_more_experiments -> executing, unless the cap is
+                                          reached (termination: cycle_limit)
 
-Adaptive loop vs. crash recovery (see graph.py)
------------------------------------------------
-``recommending -> executing`` is a genuine conditional edge inside one
-``graph.invoke()`` - the loop runs autonomously until the Recommender
-concludes. The ``START`` router is separate: it only resumes a session at
-its persisted ``current_node`` after a crash / on a fresh invocation.
+Cumulative evidence, per-cycle records
+---------------------------------------
+The Recommender deliberately reasons over *all* evidence gathered so far -
+that is what makes the loop adaptive, and why its prose legitimately refers
+to earlier cycles. What was missing was attribution: it received experiments
+and anomalies with no cycle on them, so it could only speak timelessly
+("two runs were flagged as anomalous") even in a cycle that flagged nothing.
+It now receives the cycle of every experiment and anomaly, whether each
+anomaly is still open, and where it is in the cycle budget. See
+``agents/recommender.py`` and ``models/cycle.py``.
 
-Cycle history (see backend/models/cycle.py)
--------------------------------------------
-``sessions.current_recommendation`` / ``sessions.latest_analysis`` /
-``sessions.pending_configs`` are *latest-only* / ephemeral. Because the loop
-now runs many cycles without a human in between, the per-cycle
-recommendation + statistical analysis are also appended to
-``sessions.cycle_history`` (a JSON array), and every experiment row carries
-``experiments.cycle`` - together they let the API reconstruct the full
-cycle-by-cycle investigation for the UI.
+Anomaly lifecycle
+-----------------
+``validating`` re-runs detection over every completed experiment each cycle
+and reconciles, rather than only appending. A flag raised against a thin
+3-replicate group is withdrawn once the group grows and the value proves
+ordinary, and the experiment returns to ``success`` so it counts in the
+statistics again. Without this, "no unresolved anomalies" - one of the two
+conditions the Recommender needs in order to conclude - was unreachable, and
+every investigation ran to the safety cap.
 
 Requirements
 ------------
@@ -64,8 +71,11 @@ import logging
 from typing import Dict, List, Tuple
 
 from backend.config import MAX_ADAPTIVE_CYCLES
+from backend.models.anomaly import AnomalyReport
+from backend.models.condition import ConditionKey, condition_key, condition_label
 from backend.models.cycle import CycleHistoryEntry
-from backend.models.experiment import ExperimentConfiguration, ExperimentResult
+from backend.models.experiment import ExperimentResult
+from backend.models.statistics import AnalysisSnapshot, ComparisonSkip
 from backend.state_machine.context import StateMachineContext
 from backend.state_machine.state import (
     ANALYZING,
@@ -82,26 +92,9 @@ from backend.tools.statistical_analyzer import (
 
 logger = logging.getLogger(__name__)
 
-_ConditionKey = Tuple[str, bool, Tuple[Tuple[str, float], ...]]
-
-
-def _condition_key(config: ExperimentConfiguration) -> _ConditionKey:
-    """A 'condition' is everything about a config except its random seed."""
-    return (
-        config.model_type,
-        config.preprocessing.normalize,
-        tuple(sorted(config.hyperparameters.items())),
-    )
-
-
-def _condition_label(config: ExperimentConfiguration) -> str:
-    hp = ", ".join(f"{k}={v}" for k, v in sorted(config.hyperparameters.items()))
-    parts = [config.model_type]
-    if config.preprocessing.normalize:
-        parts.append("normalized")
-    if hp:
-        parts.append(hp)
-    return " | ".join(parts)
+#: (experiment_id, rule) - the identity of one anomaly finding, used to
+#: reconcile freshly detected anomalies against the stored ones.
+_AnomalyKey = Tuple[str, str]
 
 
 class AdaptiveLoopNodes:
@@ -141,9 +134,7 @@ class AdaptiveLoopNodes:
         profile = sm.get_dataset(session.dataset_id)
 
         configs = sm.load_planned_configs(session_id)
-        # cycle_count is bumped by `recommending` at the END of each cycle, so
-        # during cycle 1's execution it is 0, during cycle 2's it is 1, ...
-        current_cycle = session.cycle_count + 1
+        current_cycle = _current_cycle(session)
         succeeded = failed = 0
         # Run one at a time and shrink the queue after each, so a crash
         # mid-batch resumes with only the not-yet-run configs still queued
@@ -166,40 +157,109 @@ class AdaptiveLoopNodes:
         return {"current_node": VALIDATING}
 
     # ------------------------------------------------------------------
-    # 3. Validation (anomaly detection)
+    # 3. Validation (anomaly detection + lifecycle reconciliation)
     # ------------------------------------------------------------------
     def validating(self, state: AdaptiveLoopState) -> Dict[str, str]:
         sm = self._ctx.state_manager
         session_id = state["session_id"]
+        session = sm.get_session(session_id)
+        current_cycle = _current_cycle(session)
 
-        experiments = sm.query_experiments(session_id, status="success")
+        # Every experiment, including ones currently flagged anomalous: the
+        # detector reports what holds *now*, over the full evidence.
+        experiments = sm.query_experiments(session_id)
         try:
-            anomalies = self._ctx.detector.detect_anomalies(experiments)
+            detected = self._ctx.detector.detect_anomalies(experiments)
         except Exception as exc:  # noqa: BLE001 - graceful degradation (design.md)
+            # Detection failing must not silently look like "nothing is wrong":
+            # that would withdraw every open flag. Leave the stored flags exactly
+            # as they are and move on.
             logger.warning(
-                "validating: anomaly detection failed for session=%s, continuing: %s",
+                "validating: anomaly detection failed for session=%s, keeping "
+                "existing flags unchanged: %s",
                 session_id, exc,
             )
-            anomalies = []
+            sm.update_session_node(session_id, ANALYZING)
+            return {"current_node": ANALYZING}
 
-        # Idempotent across re-entry: skip (experiment, rule) pairs already recorded.
-        already = {
-            (a.experiment_id, a.rule) for a in sm.query_anomalies(session_id=session_id)
-        }
-        flagged = 0
-        for anomaly in anomalies:
-            if (anomaly.experiment_id, anomaly.rule) in already:
-                continue
-            sm.store_anomaly(anomaly)
-            sm.update_experiment_status(anomaly.experiment_id, "anomalous")
-            flagged += 1
+        raised, resolved, reopened = self._reconcile_anomalies(
+            session_id, detected, current_cycle
+        )
+        self._sync_experiment_statuses(experiments, detected)
 
         sm.update_session_node(session_id, ANALYZING)
-        logger.info("validating: session=%s -> %d new anomaly report(s)", session_id, flagged)
+        logger.info(
+            "validating: session=%s cycle=%d -> %d open flag(s) "
+            "(%d newly raised, %d withdrawn, %d re-opened)",
+            session_id, current_cycle, len(detected), raised, resolved, reopened,
+        )
         return {"current_node": ANALYZING}
 
+    def _reconcile_anomalies(
+        self,
+        session_id: str,
+        detected: List[AnomalyReport],
+        current_cycle: int,
+    ) -> Tuple[int, int, int]:
+        """Bring the stored anomaly flags in line with what currently holds.
+
+        Returns ``(raised, resolved, reopened)``. Reports are never deleted -
+        a withdrawn flag keeps its row with ``resolved_cycle`` set, so the
+        history of what was flagged and when it cleared stays visible.
+        """
+        sm = self._ctx.state_manager
+        current: Dict[_AnomalyKey, AnomalyReport] = {
+            (a.experiment_id, a.rule): a for a in detected
+        }
+        stored: Dict[_AnomalyKey, AnomalyReport] = {
+            (a.experiment_id, a.rule): a
+            for a in sm.query_anomalies(session_id=session_id)
+        }
+
+        raised = resolved = reopened = 0
+
+        for key, anomaly in current.items():
+            existing = stored.get(key)
+            if existing is None:
+                anomaly.detected_cycle = current_cycle
+                sm.store_anomaly(anomaly)
+                raised += 1
+            elif not existing.is_open:
+                # It held again after having been withdrawn - re-open the
+                # original report rather than creating a duplicate.
+                sm.set_anomaly_resolution(existing.anomaly_id, None)
+                reopened += 1
+
+        for key, existing in stored.items():
+            if existing.is_open and key not in current:
+                sm.set_anomaly_resolution(existing.anomaly_id, current_cycle)
+                resolved += 1
+
+        return raised, resolved, reopened
+
+    def _sync_experiment_statuses(
+        self,
+        experiments: List[ExperimentResult],
+        detected: List[AnomalyReport],
+    ) -> None:
+        """Make ``experiments.status`` agree with the open flags.
+
+        An experiment is ``anomalous`` exactly while it carries at least one
+        open flag, and returns to ``success`` when its last flag is withdrawn -
+        which puts it back into the statistical analysis, where it belongs.
+        ``failed`` runs (no metrics) are never touched.
+        """
+        sm = self._ctx.state_manager
+        flagged = {a.experiment_id for a in detected}
+        for exp in experiments:
+            if exp.status == "failed":
+                continue
+            desired = "anomalous" if exp.experiment_id in flagged else "success"
+            if exp.status != desired:
+                sm.update_experiment_status(exp.experiment_id, desired)
+
     # ------------------------------------------------------------------
-    # 4. Analysis (statistical comparisons)
+    # 4. Analysis (statistical comparisons + per-condition summaries)
     # ------------------------------------------------------------------
     def analyzing(self, state: AdaptiveLoopState) -> Dict[str, str]:
         sm = self._ctx.state_manager
@@ -208,44 +268,86 @@ class AdaptiveLoopNodes:
         profile = sm.get_dataset(session.dataset_id)
 
         metric = "accuracy" if profile.task_type == "classification" else "val_loss"
-        experiments = sm.query_experiments(session_id, status="success")
-        comparisons = self._compare_conditions(experiments, metric)
+        # All experiments, not just successful ones: the analyzer itself uses
+        # only successful values, but the per-condition summaries need to
+        # report how many replicates were anomalous or failed.
+        experiments = sm.query_experiments(session_id)
+        analysis = self._analyze(experiments, metric)
 
-        sm.save_analysis(session_id, comparisons)
+        sm.save_analysis(session_id, analysis)
         sm.update_session_node(session_id, RECOMMENDING)
         logger.info(
-            "analyzing: session=%s -> %d pairwise comparison(s) on metric=%s",
-            session_id, len(comparisons), metric,
+            "analyzing: session=%s -> %d comparison(s), %d skipped, "
+            "%d condition(s) on metric=%s",
+            session_id,
+            len(analysis.comparisons),
+            len(analysis.skipped),
+            len(analysis.condition_summaries),
+            metric,
         )
         return {"current_node": RECOMMENDING}
 
-    def _compare_conditions(self, experiments: List[ExperimentResult], metric: str):
-        groups: Dict[_ConditionKey, List[ExperimentResult]] = {}
-        labels: Dict[_ConditionKey, str] = {}
+    def _analyze(
+        self, experiments: List[ExperimentResult], metric: str
+    ) -> AnalysisSnapshot:
+        """Compare every pair of conditions, recording both results and skips.
+
+        A pair that cannot be tested is a knowledge gap, not a non-event: the
+        reason is captured so the UI can state it and the Recommender can act
+        on it. Previously these were caught and dropped, which made "no
+        comparisons" indistinguishable from "nothing to compare".
+        """
+        groups: Dict[ConditionKey, List[ExperimentResult]] = {}
+        labels: Dict[ConditionKey, str] = {}
         for exp in experiments:
-            key = _condition_key(exp.config)
+            key = condition_key(exp.config)
             groups.setdefault(key, []).append(exp)
-            labels.setdefault(key, _condition_label(exp.config))
+            labels.setdefault(key, condition_label(exp.config))
 
         keys = list(groups)
-        out = []
+        comparisons = []
+        skipped: List[ComparisonSkip] = []
         for i in range(len(keys)):
             for j in range(i + 1, len(keys)):
+                name_a, name_b = labels[keys[i]], labels[keys[j]]
                 try:
-                    out.append(
+                    comparisons.append(
                         self._ctx.analyzer.compare_conditions(
                             groups[keys[i]],
                             groups[keys[j]],
                             metric=metric,
-                            condition_a_name=labels[keys[i]],
-                            condition_b_name=labels[keys[j]],
+                            condition_a_name=name_a,
+                            condition_b_name=name_b,
                         )
                     )
-                except (InsufficientDataError, InsufficientVarianceError):
-                    # Not enough replicates / no variance for this pair yet -
-                    # the recommender will see it as a knowledge gap.
-                    continue
-        return out
+                except (InsufficientDataError, InsufficientVarianceError) as exc:
+                    skipped.append(
+                        ComparisonSkip(
+                            condition_a_name=name_a,
+                            condition_b_name=name_b,
+                            metric=metric,
+                            reason_code=(
+                                "insufficient_variance"
+                                if isinstance(exc, InsufficientVarianceError)
+                                else "insufficient_data"
+                            ),
+                            reason=str(exc),
+                        )
+                    )
+
+        summaries = []
+        for key in keys:
+            summary = self._ctx.analyzer.summarize_condition(
+                groups[key], metric=metric, condition_name=labels[key]
+            )
+            if summary is not None:
+                summaries.append(summary)
+
+        return AnalysisSnapshot(
+            comparisons=comparisons,
+            skipped=skipped,
+            condition_summaries=summaries,
+        )
 
     # ------------------------------------------------------------------
     # 5. Recommendation
@@ -256,36 +358,36 @@ class AdaptiveLoopNodes:
         session = sm.get_session(session_id)
 
         experiments = sm.query_experiments(session_id)
-        stats = sm.load_analysis(session_id)
+        analysis = sm.load_analysis(session_id)
         anomalies = sm.query_anomalies(session_id=session_id)
+        # The cycle this recommendation closes.
+        cycle = _current_cycle(session)
 
         recommendation = self._ctx.recommender.recommend_next(
-            session.research_question, experiments, stats, anomalies
+            session.research_question,
+            experiments,
+            analysis,
+            anomalies,
+            current_cycle=cycle,
+            max_cycles=MAX_ADAPTIVE_CYCLES,
         )
-        next_cycle = session.cycle_count + 1
 
-        # Safety cap: the graph loops `recommending -> executing` autonomously,
-        # so a Recommender that never concludes would loop forever. Force a
-        # conclusion at MAX_ADAPTIVE_CYCLES, and record *why* it stopped.
-        if (
-            recommendation.action == "run_more_experiments"
-            and next_cycle >= MAX_ADAPTIVE_CYCLES
-        ):
-            recommendation = recommendation.model_copy(
-                update={
-                    "action": "conclude",
-                    "recommended_experiments": [],
-                    "evidence_summary": (
-                        recommendation.evidence_summary
-                        + f"  [Investigation stopped: reached the "
-                        f"{MAX_ADAPTIVE_CYCLES}-cycle safety limit.]"
-                    ),
-                }
-            )
+        # The agent's output is stored VERBATIM. The safety cap is a separate
+        # fact about the run, recorded in `termination_reason` - it never
+        # rewrites `action` over an explanation that argues for more
+        # experiments, which produced a final screen contradicting itself.
+        at_cap = cycle >= MAX_ADAPTIVE_CYCLES
+        if recommendation.action == "conclude":
+            termination = "agent_concluded"
+        elif at_cap:
+            termination = "cycle_limit"
             logger.warning(
-                "recommending: session=%s hit the %d-cycle cap, forcing conclude",
+                "recommending: session=%s hit the %d-cycle cap while the agent "
+                "still wanted more experiments; stopping and recording why",
                 session_id, MAX_ADAPTIVE_CYCLES,
             )
+        else:
+            termination = None
 
         sm.save_recommendation(session_id, recommendation)
         # Permanent per-cycle record (current_recommendation / latest_analysis
@@ -293,25 +395,40 @@ class AdaptiveLoopNodes:
         sm.append_cycle_history(
             session_id,
             CycleHistoryEntry(
-                cycle_number=next_cycle,
+                cycle_number=cycle,
                 recommendation=recommendation,
-                statistical_comparisons=stats,
+                statistical_comparisons=analysis.comparisons,
+                skipped_comparisons=analysis.skipped,
+                condition_summaries=analysis.condition_summaries,
+                termination_reason=termination,
             ),
         )
 
-        if recommendation.action == "conclude":
-            sm.update_session_node(session_id, CONCLUDED, cycle_count=next_cycle)
-            sm.update_session_status(session_id, "concluded")
+        if termination is not None:
+            sm.update_session_node(session_id, CONCLUDED, cycle_count=cycle)
+            sm.update_session_status(
+                session_id, "concluded", termination_reason=termination
+            )
             logger.info(
-                "recommending: session=%s -> conclude (cycle %d)", session_id, next_cycle
+                "recommending: session=%s -> stop (cycle %d, reason=%s)",
+                session_id, cycle, termination,
             )
             return {"current_node": CONCLUDED}
 
         sm.save_planned_configs(session_id, recommendation.recommended_experiments)
-        sm.update_session_node(session_id, EXECUTING, cycle_count=next_cycle)
+        sm.update_session_node(session_id, EXECUTING, cycle_count=cycle)
         logger.info(
             "recommending: session=%s -> run_more_experiments, %d config(s) queued "
             "(cycle %d complete, looping back to executing)",
-            session_id, len(recommendation.recommended_experiments), next_cycle,
+            session_id, len(recommendation.recommended_experiments), cycle,
         )
         return {"current_node": EXECUTING}
+
+
+def _current_cycle(session) -> int:
+    """The 1-based cycle currently in flight.
+
+    ``sessions.cycle_count`` is bumped by ``recommending`` at the END of each
+    cycle, so during cycle 1 it is 0, during cycle 2 it is 1, and so on.
+    """
+    return session.cycle_count + 1

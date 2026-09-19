@@ -33,9 +33,10 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Literal
+from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
+from backend.models.timestamps import UTCDateTime
 
 
 class AnomalyReport(BaseModel):
@@ -70,10 +71,33 @@ class AnomalyReport(BaseModel):
     severity: Literal["warning", "critical"] = Field(
         description="'critical' for validation_collapse, 'warning' for others"
     )
-    detected_at: datetime = Field(
+    detected_cycle: Optional[int] = Field(
+        default=None,
+        description="1-based adaptive cycle whose validation node first raised this flag",
+    )
+    resolved_cycle: Optional[int] = Field(
+        default=None,
+        description=(
+            "1-based adaptive cycle whose validation node cleared this flag, or "
+            "None while the flag is still open. See `is_open`."
+        ),
+    )
+    detected_at: UTCDateTime = Field(
         default_factory=datetime.utcnow,
         description="Anomaly detection timestamp (UTC)",
     )
+
+    @property
+    def is_open(self) -> bool:
+        """True while this flag still holds against the current evidence.
+
+        Anomaly detection is re-run over *all* of a session's experiments on
+        every cycle, so a flag raised against a 3-replicate group can be
+        withdrawn once the group grows and the value turns out to be ordinary.
+        Resolved reports are kept (never deleted) so the history of what was
+        flagged, and when it was cleared, stays visible.
+        """
+        return self.resolved_cycle is None
 
     model_config = ConfigDict(
         from_attributes=True,
@@ -88,6 +112,8 @@ class AnomalyReport(BaseModel):
                     "configuration."
                 ),
                 "severity": "warning",
+                "detected_cycle": 1,
+                "resolved_cycle": None,
                 "detected_at": "2024-01-15T10:35:00Z",
             }
         },

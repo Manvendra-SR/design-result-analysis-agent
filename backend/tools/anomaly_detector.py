@@ -19,25 +19,56 @@ collapse changed from a flat MNIST threshold to a class-count-aware test):
                          statistically distinguishable from random-chance
                          performance for the dataset's n_classes.
 
-Only ``status == "success"`` experiments are examined — a "failed"
-experiment has no ``metrics`` to analyze, and an experiment already marked
-"anomalous" doesn't need re-detecting.
+Every experiment that produced metrics is examined, including ones currently
+marked "anomalous" — the detector is stateless and reports what holds *now*,
+which is what lets the validation node withdraw a flag that no longer applies.
+Only "failed" experiments (no ``metrics`` at all) are skipped.
 
-Leave-one-out mean/std for outlier detection
----------------------------------------------
+Leave-one-out mean/std for outlier detection, and why it needs a floor
+----------------------------------------------------------------------
 The naive "include all points" z-score is mathematically bounded below
 3-sigma for small group sizes (max achievable is ``sqrt(n-1)``, below 3 for
-any ``n <= 9`` — and this project's groups are typically 3-9 replicate
-seeds). Each point's mean/std is instead computed from the *rest* of its
-group (leave-one-out / Grubbs'-test style), so an outlier can never inflate
-its own baseline.
+any ``n <= 9``). Each point's mean/std is instead computed from the *rest* of
+its group (leave-one-out / Grubbs'-test style), so an outlier can never
+inflate its own baseline.
+
+Leave-one-out alone, however, over-fires at the *bottom* end. With a group of
+3, "the rest" is 2 points, whose std is just half their gap — so 3 std devs is
+only 1.5x that gap and almost any third value clears it. A real run produced
+two "4.2 sigma" and "4.9 sigma" flags for val_loss values of 0.505 against a
+mean of 0.498: a 1.5% deviation, comfortably inside the spread the same
+condition showed once it had 16 replicates. Those false flags then excluded
+their experiments from the analysis, shrinking the baseline further, and gave
+the Recommender an anomaly it kept trying to "resolve" until the cycle cap.
+
+Two guards fix this:
+
+- ``_MIN_GROUP_FOR_OUTLIER`` (5): below this the leave-one-out std is not a
+  usable dispersion estimate at all, so the rule abstains rather than guesses.
+- ``_MIN_RELATIVE_DEVIATION`` (10%): the value must also differ from the group
+  mean by a materially large fraction of it. A z-score says "unusual for this
+  group"; this says "unusual by an amount worth a human's attention", which is
+  what an anomaly report claiming "numerical instability" should mean.
+
+Both are deliberately conservative: a missed marginal outlier costs far less
+than a false one, which actively corrupts the statistics and the loop.
+
+Re-evaluation (anomaly lifecycle)
+----------------------------------
+The detector is pure - it reports what currently holds for the experiments it
+is given, with no memory. The validation node calls it with *every* completed
+experiment in the session each cycle and reconciles the result against the
+stored flags (see ``state_machine/nodes.py``), so a flag raised early against a
+thin group is withdrawn once the group grows. That is what makes "no unresolved
+anomalies" a condition the Recommender can actually reach.
 
 Dataset-aware grouping (architecture revision)
 --------------------------------------------------
-The group key now includes ``dataset_id`` (not just model_type +
-hyperparameters). Without this, two different uploaded datasets that
-happen to share identical hyperparameters would have their val_loss values
-pooled together, which is meaningless — val_loss scale is dataset-specific.
+Grouping uses the shared ``models/condition.condition_key`` - the same
+definition of "condition" the statistical analyzer uses, so the two tools can
+never disagree about which experiments are replicates of one another. It
+includes ``dataset_id`` (val_loss scale is dataset-specific) and
+``preprocessing.normalize`` (it changes the model being fitted).
 
 Class-count-aware validation collapse — one-sided z-test (architecture revision)
 ------------------------------------------------------------------------------------
@@ -74,42 +105,44 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
 import numpy as np
 
 from backend.models.anomaly import AnomalyReport
+from backend.models.condition import ConditionKey, condition_key
 from backend.models.experiment import ExperimentResult
 from backend.tools.anomaly_templates import ANOMALY_TEMPLATES
 
 logger = logging.getLogger(__name__)
 
-# abs(value - mean) > _OUTLIER_STD_THRESHOLD * std  =>  outlier
+# abs(value - mean) > _OUTLIER_STD_THRESHOLD * std  =>  candidate outlier
 _OUTLIER_STD_THRESHOLD = 3.0
+# Minimum replicates in a condition before the outlier rule will fire at all.
+# With fewer, the leave-one-out std is not a usable dispersion estimate (see
+# the module docstring) and the rule produces false positives.
+_MIN_GROUP_FOR_OUTLIER = 5
+# The deviation must also be this fraction of the group mean. Guards against
+# "statistically unusual but practically identical" flags on tight groups.
+_MIN_RELATIVE_DEVIATION = 0.10
 # Below this, treat std as zero (avoids flagging floating-point noise as an
 # outlier when a group's values are all effectively identical).
 _MIN_STD_FOR_OUTLIER_CHECK = 1e-9
 # One-sided z critical value at 95% confidence (see module docstring).
 _VALIDATION_COLLAPSE_Z_THRESHOLD = 1.645
 
-_ConfigKey = Tuple[str, str, Tuple[Tuple[str, float], ...]]
+_ConfigKey = ConditionKey
 
 
 def _config_group_key(experiment: ExperimentResult) -> _ConfigKey:
-    """Group key: (dataset_id, model_type, hyperparameters excluding seed).
+    """Group replicates of one condition together.
 
-    ``random_seed`` is a separate top-level field on
-    ``ExperimentConfiguration`` (not part of ``hyperparameters``), so
-    grouping by this key naturally excludes it — experiments that differ
-    only by seed land in the same group. ``dataset_id`` is included so
-    results from two different uploaded datasets are never pooled together.
+    Delegates to the shared ``models/condition.condition_key`` so the detector
+    and the statistical analyzer group experiments identically. ``random_seed``
+    is a top-level field on ``ExperimentConfiguration`` rather than a
+    hyperparameter, so replicates of a condition land in the same group.
     """
-    cfg = experiment.config
-    return (
-        cfg.dataset_id,
-        cfg.model_type,
-        tuple(sorted(cfg.hyperparameters.items())),
-    )
+    return condition_key(experiment.config)
 
 
 class AnomalyDetector:
@@ -127,11 +160,16 @@ class AnomalyDetector:
         Requirements: 5.1, 5.2, 5.3, 5.6
         """
         anomalies: List[AnomalyReport] = []
-        successful = [e for e in experiments if e.status == "success"]
+        # Every experiment that produced metrics, INCLUDING ones currently
+        # flagged "anomalous". This is what makes re-evaluation possible: a run
+        # excluded from its own group's baseline could never be un-flagged, and
+        # excluding it also biased the baseline for everything else. Only
+        # "failed" runs (no metrics at all) are skipped.
+        completed = [e for e in experiments if e.status != "failed" and e.metrics]
 
-        anomalies.extend(self._detect_outliers(successful))
-        anomalies.extend(self._detect_loss_divergence(successful))
-        anomalies.extend(self._detect_validation_collapse(successful))
+        anomalies.extend(self._detect_outliers(completed))
+        anomalies.extend(self._detect_loss_divergence(completed))
+        anomalies.extend(self._detect_validation_collapse(completed))
 
         return anomalies
 
@@ -151,9 +189,9 @@ class AnomalyDetector:
             values = [
                 exp.metrics["val_loss"] for exp in group if exp.metrics  # type: ignore[index]
             ]
-            if len(values) < 3:
-                # Leave-one-out needs >= 2 "other" points per candidate to
-                # compute a meaningful std; a group of 1-2 can't establish one.
+            if len(values) < _MIN_GROUP_FOR_OUTLIER:
+                # Too few replicates for the leave-one-out std to mean anything
+                # (see module docstring) - abstain rather than guess.
                 continue
 
             for i, exp in enumerate(group):
@@ -164,8 +202,14 @@ class AnomalyDetector:
                     continue  # the rest of the group is effectively uniform
 
                 value = values[i]
+                deviation = abs(value - mean)
                 z_score = (value - mean) / std
-                if abs(value - mean) > _OUTLIER_STD_THRESHOLD * std:
+                # Both guards must hold: statistically extreme for this group,
+                # AND materially different in absolute terms.
+                if (
+                    deviation > _OUTLIER_STD_THRESHOLD * std
+                    and deviation > _MIN_RELATIVE_DEVIATION * abs(mean)
+                ):
                     anomalies.append(
                         AnomalyReport(
                             experiment_id=exp.experiment_id,

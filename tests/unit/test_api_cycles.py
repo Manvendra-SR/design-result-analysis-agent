@@ -116,18 +116,63 @@ def test_anomalies_are_grouped_into_their_cycle(state_manager) -> None:
     from backend.models.anomaly import AnomalyReport
 
     exps = state_manager.query_experiments(sid)
-    cycle2_exp = next(e for e in exps if e.cycle == 2)
+    cycle1_exp = next(e for e in exps if e.cycle == 1)
+    # Raised in cycle 2 against a cycle-1 experiment: it belongs to cycle 2's
+    # work, not cycle 1's, because that is the cycle that did the detecting.
     state_manager.store_anomaly(
         AnomalyReport(
-            experiment_id=cycle2_exp.experiment_id,
+            experiment_id=cycle1_exp.experiment_id,
             rule="outlier_detection",
             explanation="hand-injected for the test",
             severity="warning",
+            detected_cycle=2,
         )
     )
 
     body = client.get(f"/api/sessions/{sid}/cycles").json()
     cyc1, cyc2 = body[0], body[1]
-    assert cyc1["anomalies"] == []
-    assert len(cyc2["anomalies"]) == 1
-    assert cyc2["anomalies"][0]["experiment_id"] == cycle2_exp.experiment_id
+    assert cyc1["anomalies_detected"] == []
+    assert len(cyc2["anomalies_detected"]) == 1
+    assert cyc2["anomalies_detected"][0]["experiment_id"] == cycle1_exp.experiment_id
+    # ...and it is still open, so it counts from cycle 2 onward.
+    assert cyc1["open_anomaly_count"] == 0
+    assert cyc2["open_anomaly_count"] == 1
+
+
+def test_a_withdrawn_anomaly_is_attributed_to_the_cycle_that_withdrew_it(
+    state_manager,
+) -> None:
+    """Resolved flags stay in the history, on the cycle that cleared them."""
+    from backend.models.anomaly import AnomalyReport
+
+    state_manager.create_dataset(make_dataset_profile())
+    client, _ = make_test_client(
+        state_manager, recommender=run_more_n_times_then_conclude(1)
+    )
+    sid = client.post(
+        "/api/sessions",
+        json={"research_question": "q?", "dataset_id": "ds-test"},
+    ).json()["session_id"]
+    client.post(f"/api/sessions/{sid}/run-cycle")
+
+    exp = state_manager.query_experiments(sid)[0]
+    state_manager.store_anomaly(
+        AnomalyReport(
+            experiment_id=exp.experiment_id,
+            rule="outlier_detection",
+            explanation="raised in cycle 1, withdrawn in cycle 2",
+            severity="warning",
+            detected_cycle=1,
+            resolved_cycle=2,
+        )
+    )
+
+    body = client.get(f"/api/sessions/{sid}/cycles").json()
+    cyc1, cyc2 = body[0], body[1]
+    assert len(cyc1["anomalies_detected"]) == 1
+    assert cyc1["anomalies_resolved"] == []
+    assert cyc2["anomalies_detected"] == []
+    assert len(cyc2["anomalies_resolved"]) == 1
+    # open while cycle 1 ran, closed by the end of cycle 2
+    assert cyc1["open_anomaly_count"] == 1
+    assert cyc2["open_anomaly_count"] == 0

@@ -156,8 +156,10 @@ class StubRecommender:
         self,
         research_question: str,
         experiments: List[ExperimentResult],
-        statistical_results: Optional[List[StatisticalComparison]] = None,
+        statistical_results=None,
         anomalies: Optional[List[AnomalyReport]] = None,
+        current_cycle: Optional[int] = None,
+        max_cycles: Optional[int] = None,
     ) -> Recommendation:
         self.received.append(
             {
@@ -165,6 +167,8 @@ class StubRecommender:
                 "experiments": experiments,
                 "statistical_results": statistical_results,
                 "anomalies": anomalies,
+                "current_cycle": current_cycle,
+                "max_cycles": max_cycles,
             }
         )
         return self._responses.pop(0) if len(self._responses) > 1 else self._responses[0]
@@ -237,6 +241,7 @@ def build_context(
     planner: Optional[object] = None,
     recommender: Optional[object] = None,
     runner: Optional[object] = None,
+    detector: Optional[object] = None,
     task_type: str = "classification",
 ) -> StateMachineContext:
     return StateMachineContext(
@@ -244,9 +249,44 @@ def build_context(
         planner=planner or StubPlanner(),
         recommender=recommender or StubRecommender(),
         runner=runner or StubRunner(task_type=task_type),
-        detector=AnomalyDetector(),
+        detector=detector or AnomalyDetector(),
         analyzer=StatisticalAnalyzer(),
     )
+
+
+class ScriptedDetector:
+    """Returns a scripted set of anomaly findings per call.
+
+    Lets a test drive the anomaly LIFECYCLE directly: raise a flag on one
+    validation pass, then return nothing on the next and assert it was
+    withdrawn rather than left open forever.
+    """
+
+    def __init__(self, *batches) -> None:
+        # Each batch is a list of (experiment_index, rule) against the session's
+        # experiments in query order; resolved lazily so tests need not know ids.
+        self._batches = list(batches)
+        self.calls = 0
+
+    def detect_anomalies(self, experiments):
+        batch = (
+            self._batches[self.calls]
+            if self.calls < len(self._batches)
+            else (self._batches[-1] if self._batches else [])
+        )
+        self.calls += 1
+        out = []
+        for index, rule in batch:
+            exp = experiments[index]
+            out.append(
+                AnomalyReport(
+                    experiment_id=exp.experiment_id,
+                    rule=rule,
+                    explanation=f"scripted {rule}",
+                    severity="warning",
+                )
+            )
+        return out
 
 
 def make_test_client(state_manager: StateManager, **context_kwargs):

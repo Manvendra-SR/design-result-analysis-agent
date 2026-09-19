@@ -14,10 +14,22 @@ export function ResearchQuestionDisplay({
       title={session.research_question}
       badge={<Badge variant="gradient">Research Question</Badge>}
     >
+      {session.parent_session_id && (
+        <p className="card__hint" style={{ marginTop: 0 }}>
+          Follow-up investigation — it has its own experiments and evidence,
+          separate from the investigation it follows.
+        </p>
+      )}
       <div className="kv">
         <div>
           <dt>Status</dt>
-          <dd>{session.status}</dd>
+          <dd>
+            {session.termination_reason === "cycle_limit"
+              ? "stopped at cycle limit (unresolved)"
+              : session.termination_reason === "agent_concluded"
+                ? "concluded"
+                : session.status}
+          </dd>
         </div>
         <div>
           <dt>Current stage</dt>
@@ -25,11 +37,13 @@ export function ResearchQuestionDisplay({
         </div>
         <div>
           <dt>Cycles</dt>
-          <dd>{session.cycle_count}</dd>
+          <dd>
+            {session.cycle_count} / {session.max_cycles} max
+          </dd>
         </div>
         <div>
           <dt>Experiments</dt>
-          <dd>{session.experiment_count}</dd>
+          <dd>{session.experiment_count} training runs</dd>
         </div>
         <div>
           <dt>Dataset</dt>

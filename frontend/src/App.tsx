@@ -53,7 +53,11 @@ export function App() {
           </div>
         </>
       ) : (
-        <SessionView sessionId={sessionId} onBack={() => setSessionId(null)} />
+        <SessionView
+          sessionId={sessionId}
+          onBack={() => setSessionId(null)}
+          onOpenSession={setSessionId}
+        />
       )}
     </div>
   );

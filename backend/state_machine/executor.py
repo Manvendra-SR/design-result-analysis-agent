@@ -64,6 +64,13 @@ class CycleResult(BaseModel):
         default="idle",
         description="'idle' on a clean finish, 'failed' if a node raised",
     )
+    termination_reason: Optional[str] = Field(
+        default=None,
+        description=(
+            "Why the investigation stopped: 'agent_concluded' or 'cycle_limit'. "
+            "None if it is still active (e.g. the run failed part-way)."
+        ),
+    )
     cycles_completed: int = Field(
         description="Number of adaptive cycles run (== sessions.cycle_count)"
     )
@@ -71,7 +78,13 @@ class CycleResult(BaseModel):
         description="Total experiments stored for the session (all cycles, all statuses)"
     )
     recommendation: Optional[Recommendation] = Field(
-        default=None, description="The FINAL recommendation (the one that concluded the loop)"
+        default=None,
+        description=(
+            "The FINAL recommendation, exactly as the agent produced it. When "
+            "``termination_reason == 'cycle_limit'`` its action may still be "
+            "'run_more_experiments' - the cap stopped the loop, the agent did "
+            "not conclude, and callers must not present that as a settled answer."
+        ),
     )
 
 
@@ -104,7 +117,14 @@ def execute_cycle(session_id: str, context: StateMachineContext) -> CycleResult:
     session = sm.get_session(session_id)  # KeyError -> 404
 
     if session.status == CONCLUDED or session.current_node == CONCLUDED:
-        raise CycleError(f"Session {session_id!r} is already concluded.")
+        # Concluded investigations are immutable: their evidence answers the
+        # question they were created with. To keep investigating, create a new
+        # session on the same dataset (optionally with parent_session_id set) -
+        # that keeps each question's evidence cleanly separated.
+        raise CycleError(
+            f"Session {session_id!r} is already concluded. Start a follow-up "
+            f"investigation on the same dataset to keep going."
+        )
 
     if session.run_phase == "running":
         # A prior run left the flag set without clearing it (hard crash, or a
@@ -153,13 +173,15 @@ def execute_cycle(session_id: str, context: StateMachineContext) -> CycleResult:
         current_node=session.current_node,
         status=session.status,
         run_phase=session.run_phase,
+        termination_reason=session.termination_reason,
         cycles_completed=session.cycle_count,
         experiments_completed=len(experiments),
         recommendation=sm.get_recommendation(session_id),
     )
     logger.info(
-        "execute_cycle: session=%s done -> node=%s status=%s cycles=%d experiments=%d",
-        session_id, result.current_node, result.status,
+        "execute_cycle: session=%s done -> node=%s status=%s termination=%s "
+        "cycles=%d experiments=%d",
+        session_id, result.current_node, result.status, result.termination_reason,
         result.cycles_completed, result.experiments_completed,
     )
     return result

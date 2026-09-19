@@ -1,5 +1,5 @@
 import { describeConfig } from "../lib/format";
-import type { Recommendation } from "../types/api";
+import type { Recommendation, TerminationReason } from "../types/api";
 import { Badge, Card, Empty, InterpretationTag } from "./ui";
 
 /**
@@ -7,12 +7,23 @@ import { Badge, Card, Empty, InterpretationTag } from "./ui";
  * are LLM prose — italic, under an "LLM Interpretation" tag. There is no
  * per-cycle approval button: the backend already ran every cycle. This shows
  * the FINAL recommendation (GET /sessions/{id}/recommendation).
+ *
+ * The recommendation is stored exactly as the agent produced it, so on a run
+ * stopped by the safety cap its action is still `run_more_experiments`. That
+ * combination is rendered as "stopped at the limit", never as a conclusion —
+ * previously the backend rewrote the action to "conclude" and left prose
+ * arguing for more experiments underneath it.
  */
 export function RecommendationPanel({
   recommendation,
+  terminationReason = null,
+  maxCycles,
 }: {
   recommendation: Recommendation | null;
+  terminationReason?: TerminationReason | null;
+  maxCycles?: number;
 }) {
+  const stoppedAtLimit = terminationReason === "cycle_limit";
   return (
     <Card
       title="Recommendation"
@@ -21,12 +32,18 @@ export function RecommendationPanel({
         recommendation && (
           <Badge
             variant={
-              recommendation.action === "conclude" ? "ok" : "warn"
+              stoppedAtLimit
+                ? "danger"
+                : recommendation.action === "conclude"
+                  ? "ok"
+                  : "warn"
             }
           >
-            {recommendation.action === "conclude"
-              ? "Concluded"
-              : "More experiments"}
+            {stoppedAtLimit
+              ? "Stopped at limit"
+              : recommendation.action === "conclude"
+                ? "Concluded"
+                : "More experiments"}
           </Badge>
         )
       }
@@ -37,7 +54,17 @@ export function RecommendationPanel({
         </Empty>
       ) : (
         <div className="stack" style={{ gap: 16 }}>
-          {recommendation.action === "conclude" && (
+          {stoppedAtLimit && (
+            <div className="error-box" role="status">
+              <strong>This is not a settled answer.</strong> The investigation
+              hit its {maxCycles ?? ""}-cycle safety limit while the agent still
+              wanted more experiments. What follows is the agent&apos;s last
+              reasoning — the case for continuing, not a conclusion. Ask a
+              follow-up question below to keep investigating.
+            </div>
+          )}
+
+          {!stoppedAtLimit && recommendation.action === "conclude" && (
             <div className="concluded-banner">
               <span aria-hidden="true">✓</span>
               <span>
@@ -64,7 +91,9 @@ export function RecommendationPanel({
           {recommendation.recommended_experiments.length > 0 && (
             <div>
               <h3 className="card__hint" style={{ margin: "0 0 4px" }}>
-                Experiments it queued next
+                {stoppedAtLimit
+                  ? "Experiments it wanted next (never run — the limit stopped the loop)"
+                  : "Experiments it queued next"}
               </h3>
               <ul className="list-plain mono">
                 {recommendation.recommended_experiments.map((cfg, i) => (

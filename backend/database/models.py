@@ -135,6 +135,19 @@ class SessionModel(Base):
         index=True,
         comment="Foreign key to datasets table - the dataset this session investigates",
     )
+    parent_session_id: str | None = Column(
+        UUID_TYPE,
+        ForeignKey("sessions.session_id", ondelete="SET NULL"),
+        nullable=True,
+        default=None,
+        index=True,
+        comment=(
+            "The investigation this one follows up on, if any. Provenance only: "
+            "experiments, anomalies and cycle history stay strictly scoped to "
+            "their own session_id, so a follow-up question can never inherit "
+            "the previous question's evidence."
+        ),
+    )
     research_question: str = Column(
         Text,
         nullable=False,
@@ -145,6 +158,17 @@ class SessionModel(Base):
         nullable=False,
         default="active",
         comment="'active' | 'concluded'",
+    )
+    termination_reason: str | None = Column(
+        String(32),
+        nullable=True,
+        default=None,
+        comment=(
+            "Why the investigation stopped, set when it reaches 'concluded': "
+            "'agent_concluded' (the Recommender judged the evidence sufficient) "
+            "or 'cycle_limit' (the MAX_ADAPTIVE_CYCLES safety cap stopped a loop "
+            "that still wanted to continue - not a settled answer). NULL while active."
+        ),
     )
     current_node: str = Column(
         String(20),
@@ -393,6 +417,24 @@ class AnomalyModel(Base):
         String(20),
         nullable=False,
         comment="'warning' | 'critical'",
+    )
+    detected_cycle: int | None = Column(
+        Integer,
+        nullable=True,
+        default=None,
+        comment="1-based adaptive cycle whose validation node first raised this flag",
+    )
+    resolved_cycle: int | None = Column(
+        Integer,
+        nullable=True,
+        default=None,
+        index=True,
+        comment=(
+            "1-based adaptive cycle whose validation node withdrew this flag, or "
+            "NULL while it is still open. Detection re-runs over every experiment "
+            "each cycle, so a flag raised against a 3-replicate group can be "
+            "cleared once the group grows. Resolved rows are kept, never deleted."
+        ),
     )
     detected_at: datetime = Column(
         DateTime,

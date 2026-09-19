@@ -135,14 +135,59 @@ def test_compare_conditions_insufficient_data_raises() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 5. Insufficient variance (identical values -> std ~ 0)
+# 5. Deterministic conditions (identical values -> std == 0)
 # ---------------------------------------------------------------------------
 
-def test_compare_conditions_insufficient_variance_raises() -> None:
+def test_one_deterministic_condition_uses_a_one_sample_t_test() -> None:
+    """A deterministic condition is a known constant, not missing information.
+
+    ``linear_baseline`` returns an identical metric for every seed, so the
+    varying condition is tested against that constant rather than the whole
+    comparison being abandoned - which previously produced zero statistical
+    output for an entire investigation.
+    """
+    cond_a = _condition(CONDITION_A_ACC, dropout=0.0)
+    cond_b = _condition([0.9, 0.9, 0.9], dropout=0.5)
+
+    result = StatisticalAnalyzer().compare_conditions(cond_a, cond_b)
+
+    assert result.test_type == "one_sample_t"
+    assert result.sample_sizes == (len(CONDITION_A_ACC), 3)
+    assert 0.0 <= result.p_value <= 1.0
+
+
+def test_one_sample_result_is_oriented_a_minus_b_either_way() -> None:
+    """Which side is constant must not flip the sign of the reported result."""
+    varying = _condition([0.80, 0.82, 0.84], dropout=0.0)
+    constant = _condition([0.90, 0.90, 0.90], dropout=0.5)
+    analyzer = StatisticalAnalyzer()
+
+    a_varies = analyzer.compare_conditions(varying, constant)
+    b_varies = analyzer.compare_conditions(constant, varying)
+
+    # mean(varying) < 0.90, so "varying vs constant" is negative and the
+    # reverse orientation is its mirror image.
+    assert a_varies.t_statistic < 0 and b_varies.t_statistic > 0
+    assert a_varies.t_statistic == pytest.approx(-b_varies.t_statistic)
+    assert a_varies.effect_size == pytest.approx(-b_varies.effect_size)
+    assert a_varies.p_value == pytest.approx(b_varies.p_value)
+
+
+def test_both_conditions_deterministic_raises_insufficient_variance() -> None:
+    """Two constants: no t-test of any kind is defined."""
     cond_a = _condition([0.9, 0.9, 0.9], dropout=0.0)
-    cond_b = _condition(CONDITION_B_ACC, dropout=0.5)
+    cond_b = _condition([0.8, 0.8, 0.8], dropout=0.5)
 
     with pytest.raises(InsufficientVarianceError):
+        StatisticalAnalyzer().compare_conditions(cond_a, cond_b)
+
+
+def test_a_single_replicate_is_insufficient_data_not_a_constant() -> None:
+    """One observation has std 0 trivially; it does not prove determinism."""
+    cond_a = _condition(CONDITION_A_ACC, dropout=0.0)
+    cond_b = _condition([0.9], dropout=0.5)
+
+    with pytest.raises(InsufficientDataError):
         StatisticalAnalyzer().compare_conditions(cond_a, cond_b)
 
 

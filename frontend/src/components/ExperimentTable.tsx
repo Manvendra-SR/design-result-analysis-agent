@@ -15,6 +15,20 @@ function metric(exp: ExperimentResult, key: string): string {
 }
 
 /**
+ * Which epoch the reported val_loss / accuracy come from. The mlp trainer runs
+ * a fixed number of epochs and reports the best one (lowest validation loss),
+ * so showing that epoch is the difference between a number the reader can
+ * trust and one they have to guess at. linear_baseline has no epoch loop and
+ * records neither key, hence the dash.
+ */
+function bestEpoch(exp: ExperimentResult): string {
+  const best = exp.metrics?.best_epoch;
+  const ran = exp.metrics?.epochs_ran;
+  if (best === undefined || ran === undefined) return "—";
+  return `${best} / ${ran}`;
+}
+
+/**
  * ExperimentTable (task 7.7). Newest first, colour-coded status, expandable
  * rows for the full config / error. Experiments are grouped by the adaptive
  * cycle that produced them (experiments.cycle) so the accumulation across
@@ -52,6 +66,7 @@ export function ExperimentTable({
     <Card
       title="Experiments"
       badge={<Badge variant="gradient">Computed</Badge>}
+      hint="One row = one experiment: a complete training run of one configuration. `epochs` is how many passes over the training data happen inside that single run — it is not a count of experiments."
       right={
         <span style={{ display: "flex", gap: 8 }}>
           <Badge variant="ok">{counts.success} ok</Badge>
@@ -72,6 +87,9 @@ export function ExperimentTable({
                 <th className="num">train_loss</th>
                 <th className="num">val_loss</th>
                 <th className="num">accuracy</th>
+                <th className="num" title="Epoch the reported val_loss / accuracy come from, out of the epochs run">
+                  best epoch
+                </th>
                 <th>Status</th>
                 <th>When</th>
               </tr>
@@ -90,6 +108,7 @@ export function ExperimentTable({
                       <td className="num">{metric(exp, "train_loss")}</td>
                       <td className="num">{metric(exp, "val_loss")}</td>
                       <td className="num">{metric(exp, "accuracy")}</td>
+                      <td className="num">{bestEpoch(exp)}</td>
                       <td>
                         <StatusBadge status={exp.status} />
                       </td>
@@ -97,7 +116,7 @@ export function ExperimentTable({
                     </tr>
                     {isOpen && (
                       <tr>
-                        <td className="detail-cell" colSpan={7}>
+                        <td className="detail-cell" colSpan={8}>
                           <pre>
                             {JSON.stringify(
                               {

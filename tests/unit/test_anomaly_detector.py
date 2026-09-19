@@ -248,17 +248,50 @@ def test_severity_mapping() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 13. Failed / already-anomalous experiments are ignored entirely
+# 13. Failed experiments are ignored; already-anomalous ones are RE-EXAMINED
 # ---------------------------------------------------------------------------
 
-def test_failed_and_already_anomalous_experiments_are_ignored() -> None:
-    cfg = _mlp_cfg()
-    failed = _exp(cfg, status="failed")
-    already_anomalous = _exp(cfg, accuracy=0.05, status="anomalous")
+def test_failed_experiments_are_ignored() -> None:
+    """A failed run has no metrics, so no rule can apply to it."""
+    failed = _exp(_mlp_cfg(), status="failed")
 
-    anomalies = AnomalyDetector().detect_anomalies([failed, already_anomalous])
+    assert AnomalyDetector().detect_anomalies([failed]) == []
 
-    assert anomalies == []
+
+def test_already_anomalous_experiments_are_re_examined() -> None:
+    """The detector is stateless: it reports what holds now, over everything.
+
+    Skipping already-flagged runs would make a flag permanent - it could never
+    be withdrawn, and the run would stay excluded from its own group's
+    baseline. The validation node relies on this to reconcile the lifecycle.
+    """
+    still_bad = _exp(_mlp_cfg(), accuracy=0.05, status="anomalous")
+
+    anomalies = AnomalyDetector().detect_anomalies([still_bad])
+
+    assert [a.rule for a in anomalies] == ["validation_collapse"]
+
+
+def test_a_flag_stops_holding_once_the_group_grows() -> None:
+    """A value that looked extreme against 2 peers is ordinary against 9.
+
+    This is the case that previously produced permanent false positives: a
+    1.5%-off val_loss flagged at "4.2 sigma" because the leave-one-out std of
+    two points is tiny.
+    """
+    borderline = _exp(_mlp_cfg(seed=1), val_loss=0.505)
+    peers_small = [
+        _exp(_mlp_cfg(seed=i), val_loss=v)
+        for i, v in enumerate([0.496, 0.500], 2)
+    ]
+    peers_large = [
+        _exp(_mlp_cfg(seed=i), val_loss=v)
+        for i, v in enumerate([0.496, 0.500, 0.499, 0.494, 0.507, 0.495, 0.503], 2)
+    ]
+
+    detector = AnomalyDetector()
+    assert detector.detect_anomalies([borderline, *peers_small]) == []
+    assert detector.detect_anomalies([borderline, *peers_large]) == []
 
 
 # ---------------------------------------------------------------------------

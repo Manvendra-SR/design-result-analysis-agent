@@ -23,6 +23,7 @@ from typing import Optional
 from pydantic import BaseModel, Field
 
 from backend.models.recommendation import Recommendation
+from backend.models.timestamps import UTCDateTime
 
 
 class CreateSessionRequest(BaseModel):
@@ -35,11 +36,20 @@ class CreateSessionRequest(BaseModel):
 
     research_question: str = Field(min_length=1, max_length=500)
     dataset_id: str = Field(min_length=1)
+    parent_session_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "The concluded investigation this one follows up on. Provenance "
+            "only - the new investigation starts with no experiments of its "
+            "own, so evidence gathered for the previous question can never "
+            "contaminate this one."
+        ),
+    )
 
 
 class CreateSessionResponse(BaseModel):
     session_id: str
-    created_at: datetime
+    created_at: UTCDateTime
 
 
 class SessionDetailResponse(BaseModel):
@@ -47,6 +57,10 @@ class SessionDetailResponse(BaseModel):
 
     session_id: str
     dataset_id: str
+    parent_session_id: Optional[str] = Field(
+        default=None,
+        description="The investigation this one follows up on, if any",
+    )
     research_question: str
     status: str
     current_node: str
@@ -57,13 +71,25 @@ class SessionDetailResponse(BaseModel):
     run_error: Optional[str] = Field(
         default=None, description="Error text from the last failed run; null otherwise"
     )
+    termination_reason: Optional[str] = Field(
+        default=None,
+        description=(
+            "Why the investigation stopped. 'agent_concluded' - the Recommender "
+            "judged the evidence sufficient. 'cycle_limit' - the safety cap "
+            "stopped a loop that still wanted more experiments, which is NOT a "
+            "settled answer and must be shown differently. None while active."
+        ),
+    )
     cycle_count: int
     experiment_count: int
+    max_cycles: int = Field(
+        description="The MAX_ADAPTIVE_CYCLES safety cap this session runs under"
+    )
     plan_explanation: Optional[str] = Field(
         default=None, description="Planner's rationale for the initial experiment design"
     )
-    created_at: datetime
-    updated_at: datetime
+    created_at: UTCDateTime
+    updated_at: UTCDateTime
 
 
 class RunCycleResponse(BaseModel):
@@ -82,6 +108,10 @@ class RunCycleResponse(BaseModel):
     run_phase: str = Field(
         default="idle",
         description="'idle' when the run finished cleanly, 'failed' if it errored",
+    )
+    termination_reason: Optional[str] = Field(
+        default=None,
+        description="'agent_concluded' | 'cycle_limit' | null (still active)",
     )
     cycles_completed: int = Field(description="Number of adaptive cycles that ran")
     experiments_completed: int

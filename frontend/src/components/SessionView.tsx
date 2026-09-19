@@ -8,12 +8,13 @@ import {
   useRunInvestigation,
   useSession,
 } from "../hooks/queries";
-import { deriveRunState } from "../lib/runState";
+import { deriveRunState, isFinished } from "../lib/runState";
 import { api } from "../services/api";
 import { AdaptiveLoopVisualizer } from "./AdaptiveLoopVisualizer";
 import { CycleHistory } from "./CycleHistory";
 import { ExperimentTable } from "./ExperimentTable";
 import { ExperimentVisualizer } from "./ExperimentVisualizer";
+import { FollowUpPanel } from "./FollowUpPanel";
 import { RecommendationPanel } from "./RecommendationPanel";
 import { ResearchQuestionDisplay } from "./ResearchQuestionDisplay";
 import { RunControl } from "./RunControl";
@@ -30,9 +31,11 @@ import { Card, ErrorBox, Spinner } from "./ui";
 export function SessionView({
   sessionId,
   onBack,
+  onOpenSession,
 }: {
   sessionId: string;
   onBack: () => void;
+  onOpenSession?: (sessionId: string) => void;
 }) {
   const run = useRunInvestigation(sessionId);
   const session = useSession(sessionId, run.isPending);
@@ -75,9 +78,14 @@ export function SessionView({
   }
 
   const s = session.data;
-  const allComparisons = (cycles.data ?? []).flatMap(
-    (c) => c.statistical_comparisons,
-  );
+  // Each cycle stores the CUMULATIVE analysis as of that cycle, so flattening
+  // every cycle's list would show the same comparison once per cycle. The
+  // latest cycle already contains everything computed so far.
+  const latestCycle = (cycles.data ?? []).at(-1);
+  const comparisons = latestCycle?.statistical_comparisons ?? [];
+  const skipped = latestCycle?.skipped_comparisons ?? [];
+  const conditionSummaries = latestCycle?.condition_summaries ?? [];
+  const finished = isFinished(runState);
 
   return (
     <div className="stack">
@@ -101,9 +109,25 @@ export function SessionView({
         onRun={() => run.mutate()}
       />
 
-      <RecommendationPanel recommendation={recommendation.data ?? null} />
+      <RecommendationPanel
+        recommendation={recommendation.data ?? null}
+        terminationReason={s.termination_reason}
+        maxCycles={s.max_cycles}
+      />
 
-      <StatisticsPanel comparisons={allComparisons} />
+      {finished && onOpenSession && (
+        <FollowUpPanel
+          session={s}
+          stoppedAtLimit={runState === "stopped_at_limit"}
+          onOpenSession={onOpenSession}
+        />
+      )}
+
+      <StatisticsPanel
+        comparisons={comparisons}
+        skipped={skipped}
+        conditionSummaries={conditionSummaries}
+      />
 
       <ExperimentVisualizer experiments={experiments.data ?? []} />
 

@@ -48,6 +48,7 @@ from datetime import datetime
 from typing import Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
+from backend.models.timestamps import UTCDateTime
 
 
 class DatasetValidationError(ValueError):
@@ -156,7 +157,7 @@ class DatasetProfile(BaseModel):
             "landing in validation."
         )
     )
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: UTCDateTime = Field(default_factory=datetime.utcnow)
 
     model_config = ConfigDict(
         from_attributes=True,

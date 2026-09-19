@@ -18,10 +18,31 @@ directly comparable ("which of these configurations performs best?"):
 
 - ``classification``: ``train_loss``, ``val_loss``, ``accuracy``,
   ``n_classes``, ``n_val_samples``, ``training_time_seconds``
-  (+ ``initial_train_loss`` for ``mlp`` only)
+  (+ ``initial_train_loss``, ``best_epoch``, ``epochs_ran``,
+  ``final_val_loss``, ``final_accuracy`` for ``mlp`` only)
 - ``regression``: ``train_loss``, ``val_loss``, ``training_time_seconds``
   — no ``accuracy`` key at all (replaces the old "accuracy=0.0 by
   convention" approach; regression results never fake a classification metric)
+
+Which epoch the reported metrics come from
+---------------------------------------------
+``mlp`` trains for a fixed ``epochs`` and evaluates the validation split after
+every epoch. The reported ``val_loss`` / ``accuracy`` are the **best epoch's**
+(lowest validation loss), not the last epoch's - the standard early-stopping
+choice, and the honest one: scoring a run that peaked at epoch 8 by its
+overfitted epoch-20 state measures the epoch budget, not the configuration
+under test. No weights are restored and training is never cut short, so this
+costs nothing: the per-epoch validation pass already ran.
+
+The last epoch's values are kept alongside as ``final_val_loss`` /
+``final_accuracy``, with ``best_epoch`` saying where the best one was, so the
+gap between "best" and "final" - i.e. how much the run overfitted - stays
+visible instead of being silently absorbed. Selection and reporting both use
+the validation split, so the reported figure is mildly optimistic in absolute
+terms; the selection rule is identical for every condition, so comparisons
+between conditions remain fair, which is what this system actually reports on.
+``linear_baseline`` has no epoch loop, so best and final coincide and it emits
+neither key.
 
 Seed vs. split
 ---------------
@@ -170,6 +191,11 @@ def train_mlp(
     epoch_train_losses: List[float] = []
     val_loss = 0.0
     accuracy = 0.0
+    # Best-epoch (early-stopping) selection - see the module docstring. The
+    # per-epoch validation pass already runs, so keeping the best costs nothing.
+    best_val_loss = float("inf")
+    best_accuracy = 0.0
+    best_epoch = 0
 
     x_val_device = x_val_t.to(device)
     y_val_device = y_val_t.to(device)
@@ -199,6 +225,11 @@ def train_mlp(
                 preds = val_outputs.argmax(dim=1)
                 accuracy = float((preds == y_val_device).float().mean().item())
 
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_accuracy = accuracy
+            best_epoch = epoch + 1  # 1-based, as a human counts epochs
+
         logger.debug(
             "mlp epoch %d/%d: train_loss=%.4f val_loss=%.4f",
             epoch + 1, epochs, epoch_train_loss, val_loss,
@@ -206,23 +237,35 @@ def train_mlp(
 
     training_time = time.perf_counter() - start
     initial_train_loss, final_train_loss = _loss_window_endpoints(epoch_train_losses)
+    if best_epoch == 0:  # defensive: no epoch completed, nothing to select from
+        best_val_loss, best_accuracy = val_loss, accuracy
 
     metrics = {
+        # train_loss stays the END-of-training value: it exists to be read
+        # against initial_train_loss by the loss-divergence rule, which is a
+        # statement about the last 20% of epochs, not about the best one.
         "train_loss": final_train_loss,
-        "val_loss": val_loss,
+        # val_loss / accuracy are the BEST epoch's, not the last one's.
+        "val_loss": best_val_loss,
         "training_time_seconds": training_time,
         "initial_train_loss": initial_train_loss,
+        "best_epoch": float(best_epoch),
+        "epochs_ran": float(epochs),
+        "final_val_loss": val_loss,
     }
     if is_classification:
-        metrics["accuracy"] = accuracy
+        metrics["accuracy"] = best_accuracy
+        metrics["final_accuracy"] = accuracy
         metrics["n_classes"] = float(dataset_profile.n_classes)
         metrics["n_val_samples"] = float(len(split.y_val))
 
     logger.info(
         "mlp training complete: dataset=%s hidden_size=%d dropout=%.2f lr=%.4f "
-        "batch_size=%d epochs=%d seed=%d -> val_loss=%.4f (%.1fs)",
+        "batch_size=%d epochs=%d seed=%d -> val_loss=%.4f at epoch %d/%d "
+        "(final-epoch val_loss=%.4f) (%.1fs)",
         dataset_profile.dataset_id, hidden_size, dropout, learning_rate,
-        batch_size, epochs, config.random_seed, val_loss, training_time,
+        batch_size, epochs, config.random_seed, best_val_loss, best_epoch,
+        epochs, val_loss, training_time,
     )
 
     return ExperimentResult(

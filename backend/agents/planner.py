@@ -15,10 +15,11 @@ is the deterministic guard rail around that choice:
 - forces ``dataset_id`` to the real dataset (a small local model cannot be
   trusted to echo a UUID, and there is exactly one valid dataset per
   session), logging a warning if the model supplied a different one;
-- **guarantees Requirement 2.3 by deterministic repair**: any condition the
-  LLM gave fewer than 3 distinct random seeds is topped up with extra
-  configs on fresh, unused seeds (rather than rejecting the whole plan, which
-  a 7B model triggers routinely). See ``_repair_seeds``.
+- **guarantees Requirement 2.3 by deterministic repair**: every condition is
+  renumbered onto the SAME seeds 1, 2, 3, ... and topped up to at least 3
+  replicates (rather than rejecting a short plan, which a small model triggers
+  routinely). Matching the seeds across conditions is what keeps "vary one
+  factor" honest - see ``models/condition.assign_matched_seeds``.
 - enforces that the plan compares at least two conditions (Requirement 2.2
   - "vary one factor at a time" only makes sense with >= 2 levels).
 
@@ -70,6 +71,7 @@ from backend.agents.output_schemas import (
     strip_null_hyperparameters,
 )
 from backend.agents.parsing import JSONParseError
+from backend.models.condition import assign_matched_seeds
 from backend.models.dataset import DatasetProfile
 from backend.models.experiment import ExperimentConfiguration, ExperimentPlan
 
@@ -311,34 +313,23 @@ class ExperimentPlannerAgent:
     def _repair_seeds(
         self, configs: List[ExperimentConfiguration]
     ) -> List[ExperimentConfiguration]:
-        """Guarantee >= ``_MIN_SEEDS_PER_CONDITION`` distinct seeds per condition.
+        """Give every condition the same ``_MIN_SEEDS_PER_CONDITION`` seeds.
 
-        Deterministic: for any short condition, clone its first config onto
-        fresh seeds (the smallest integers above every seed already used in
-        the plan, skipping collisions). A plan the LLM already got right
-        passes through unchanged.
+        Delegates to ``models/condition.assign_matched_seeds``: replicates are
+        numbered 1, 2, 3 in EVERY condition, so a plan that varies one factor
+        compares seed 1 against seed 1. The seed values the LLM picked are
+        discarded - no seed value means anything on its own, and letting each
+        condition keep its own draws added a difference between the conditions
+        that has nothing to do with the factor under test. Deterministic.
         """
-        groups = self._group_by_condition(configs)
-        used_seeds = {c.random_seed for c in configs}
-        next_seed = (max(used_seeds) if used_seeds else 41) + 1
-        repaired = list(configs)
-
-        for key, group in groups.items():
-            seeds = {c.random_seed for c in group}
-            if len(seeds) >= _MIN_SEEDS_PER_CONDITION:
-                continue
-            template = group[0]
-            before = len(seeds)
-            while len(seeds) < _MIN_SEEDS_PER_CONDITION:
-                while next_seed in used_seeds:
-                    next_seed += 1
-                used_seeds.add(next_seed)
-                seeds.add(next_seed)
-                repaired.append(template.model_copy(update={"random_seed": next_seed}))
-                next_seed += 1
+        repaired = assign_matched_seeds(
+            configs, min_replicates=_MIN_SEEDS_PER_CONDITION
+        )
+        if len(repaired) != len(configs):
             logger.info(
-                "planner: topped up condition %s from %d to %d distinct seeds",
-                self._describe_condition(key), before, _MIN_SEEDS_PER_CONDITION,
+                "planner: topped the plan up from %d to %d configurations so "
+                "every condition has %d matched seeds",
+                len(configs), len(repaired), _MIN_SEEDS_PER_CONDITION,
             )
         return repaired
 
@@ -356,9 +347,3 @@ class ExperimentPlannerAgent:
             )
             groups.setdefault(key, []).append(c)
         return groups
-
-    @staticmethod
-    def _describe_condition(key: Tuple[Any, ...]) -> str:
-        model_type, normalize, hp = key
-        hp_str = ", ".join(f"{k}={v}" for k, v in hp) or "no hyperparameters"
-        return f"({model_type}, normalize={normalize}, {hp_str})"

@@ -163,9 +163,19 @@ export function SessionManager({
                         className="row-clickable investigation-list-row"
                         onClick={() => onOpenSession(s.session_id)}
                       >
-                        <td>{s.research_question}</td>
                         <td>
-                          {s.status === "concluded" ? (
+                          {s.research_question}
+                          {s.parent_session_id && (
+                            <>
+                              {" "}
+                              <Badge variant="muted">follow-up</Badge>
+                            </>
+                          )}
+                        </td>
+                        <td>
+                          {s.termination_reason === "cycle_limit" ? (
+                            <Badge variant="danger">stopped at limit</Badge>
+                          ) : s.status === "concluded" ? (
                             <Badge variant="ok">concluded</Badge>
                           ) : s.run_phase === "running" ? (
                             <Badge variant="warn">running</Badge>

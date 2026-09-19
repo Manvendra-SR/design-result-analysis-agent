@@ -1,7 +1,7 @@
 import { Fragment } from "react";
 
 import { STAGE_ROLE, WORKFLOW_STAGES } from "../lib/format";
-import type { RunState } from "../lib/runState";
+import { isFinished, type RunState } from "../lib/runState";
 import type { WorkflowNode } from "../types/api";
 import { Badge, Card } from "./ui";
 
@@ -29,7 +29,8 @@ export function AdaptiveLoopVisualizer({
   experimentCount: number;
   runState: RunState;
 }) {
-  const concluded = runState === "concluded" || currentNode === "concluded";
+  const concluded = isFinished(runState) || currentNode === "concluded";
+  const stoppedAtLimit = runState === "stopped_at_limit";
   const running = runState === "running";
   const failed = runState === "failed";
   const activeIndex = WORKFLOW_STAGES.indexOf(currentNode);
@@ -47,7 +48,9 @@ export function AdaptiveLoopVisualizer({
       title="Adaptive Loop"
       badge={<Badge variant="gradient">Workflow</Badge>}
       right={
-        concluded ? (
+        stoppedAtLimit ? (
+          <Badge variant="danger">Stopped at limit</Badge>
+        ) : concluded ? (
           <Badge variant="ok">Concluded</Badge>
         ) : failed ? (
           <Badge variant="danger">Run failed</Badge>
@@ -154,15 +157,22 @@ export function AdaptiveLoopVisualizer({
         </div>
       )}
 
-      {concluded && (
-        <div className="concluded-banner" role="status">
-          <span aria-hidden="true">✓</span>
-          <span>
-            The adaptive loop has concluded after {cycleCount}{" "}
-            {cycleCount === 1 ? "cycle" : "cycles"}.
-          </span>
-        </div>
-      )}
+      {concluded &&
+        (stoppedAtLimit ? (
+          <div className="error-box" role="status" style={{ marginTop: 16 }}>
+            The adaptive loop stopped after {cycleCount}{" "}
+            {cycleCount === 1 ? "cycle" : "cycles"} because it reached the
+            safety limit — the agent had not finished investigating.
+          </div>
+        ) : (
+          <div className="concluded-banner" role="status">
+            <span aria-hidden="true">✓</span>
+            <span>
+              The adaptive loop has concluded after {cycleCount}{" "}
+              {cycleCount === 1 ? "cycle" : "cycles"}.
+            </span>
+          </div>
+        ))}
     </Card>
   );
 }

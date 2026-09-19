@@ -23,11 +23,12 @@ Requirements
 from __future__ import annotations
 
 from datetime import datetime
-from typing import List, Literal
+from typing import List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
 from backend.models.experiment import ExperimentConfiguration
+from backend.models.timestamps import UTCDateTime
 
 
 # ---------------------------------------------------------------------------
@@ -50,6 +51,16 @@ class Recommendation(BaseModel):
         Sufficient evidence accumulated; state machine transitions to
         Conclusion node.
 
+    Stored verbatim
+    ---------------
+    This is the agent's own output and is **never rewritten** by the system.
+    In particular, when the ``MAX_ADAPTIVE_CYCLES`` safety cap stops a loop
+    whose last recommendation was ``run_more_experiments``, that recommendation
+    is stored as-is and the stop is recorded separately in
+    ``sessions.termination_reason``. Rewriting ``action`` to ``"conclude"``
+    while leaving an explanation that argues for *more* experiments produced a
+    final screen that contradicted itself.
+
     Requirements covered: 6.3, 6.4, 6.9
     """
 
@@ -68,7 +79,7 @@ class Recommendation(BaseModel):
     evidence_summary: str = Field(
         description="LLM summary of accumulated statistical evidence"
     )
-    timestamp: datetime = Field(
+    timestamp: UTCDateTime = Field(
         default_factory=datetime.utcnow,
         description="Recommendation generation timestamp (UTC)",
     )
@@ -127,8 +138,21 @@ class SessionSummary(BaseModel):
         default="idle",
         description="'idle' | 'running' | 'failed' - is a run-cycle actually in progress",
     )
+    termination_reason: Optional[str] = Field(
+        default=None,
+        description=(
+            "Why the investigation stopped: 'agent_concluded' (the Recommender "
+            "judged the evidence sufficient) or 'cycle_limit' (the safety cap "
+            "stopped a loop that wanted to continue - not a settled answer). "
+            "None while still active."
+        ),
+    )
+    parent_session_id: Optional[str] = Field(
+        default=None,
+        description="The investigation this one follows up on, if any",
+    )
     cycle_count: int = Field(description="Number of completed adaptive cycles")
     experiment_count: int = Field(
         description="Total experiments stored for this session"
     )
-    created_at: datetime = Field(description="Session creation timestamp (UTC)")
+    created_at: UTCDateTime = Field(description="Session creation timestamp (UTC)")

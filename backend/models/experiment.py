@@ -54,6 +54,7 @@ from typing import Dict, List, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from backend.models.dataset import PreprocessingConfig
+from backend.models.timestamps import UTCDateTime
 
 
 # ---------------------------------------------------------------------------
@@ -160,8 +161,11 @@ class ExperimentResult(BaseModel):
 
     - ``classification``: ``train_loss``, ``val_loss``, ``accuracy``,
       ``n_classes``, ``n_val_samples``, ``training_time_seconds``
-      (+ ``initial_train_loss`` for ``mlp`` only - no epoch loop for
-      ``linear_baseline``)
+      (+ ``initial_train_loss``, ``best_epoch``, ``epochs_ran``,
+      ``final_val_loss``, ``final_accuracy`` for ``mlp`` only - no epoch loop
+      for ``linear_baseline``). ``val_loss``/``accuracy`` are the BEST epoch's
+      (lowest validation loss); the last epoch's are kept separately as
+      ``final_val_loss``/``final_accuracy``. See ``tools/trainers.py``.
     - ``regression``: ``train_loss``, ``val_loss``, ``training_time_seconds``
       - no ``accuracy`` key at all (replaces the old "accuracy=0.0 by
       convention" approach)
@@ -206,7 +210,7 @@ class ExperimentResult(BaseModel):
             "execution node). None for experiments stored outside the loop."
         ),
     )
-    timestamp: datetime = Field(
+    timestamp: UTCDateTime = Field(
         default_factory=datetime.utcnow,
         description="Experiment run timestamp (UTC)",
     )

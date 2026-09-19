@@ -83,7 +83,8 @@ def test_conclude_reaches_end(state_manager) -> None:
 # 4. Safety cap
 # ---------------------------------------------------------------------------
 
-def test_safety_cap_forces_conclusion(state_manager) -> None:
+def test_safety_cap_stops_the_loop_and_says_so(state_manager) -> None:
+    """A capped run is stopped, not concluded - and reports itself that way."""
     sid = _seed(state_manager)
     ctx = build_context(state_manager, recommender=always_run_more())
 
@@ -91,10 +92,22 @@ def test_safety_cap_forces_conclusion(state_manager) -> None:
 
     assert result.status == "concluded"
     assert result.cycles_completed == MAX_ADAPTIVE_CYCLES
-    assert result.recommendation.action == "conclude"
-    assert "safety limit" in result.recommendation.evidence_summary
-    # every forced cycle is still in the history
+    assert result.termination_reason == "cycle_limit"
+    # The agent never concluded, and we do not pretend it did.
+    assert result.recommendation.action == "run_more_experiments"
+    # every cycle is still in the history
     assert len(state_manager.get_cycle_history(sid)) == MAX_ADAPTIVE_CYCLES
+
+
+def test_agent_conclusion_is_reported_as_agent_concluded(state_manager) -> None:
+    sid = _seed(state_manager)
+    ctx = build_context(state_manager, recommender=run_more_then_conclude())
+
+    result = execute_cycle(sid, ctx)
+
+    assert result.termination_reason == "agent_concluded"
+    assert result.recommendation.action == "conclude"
+    assert result.cycles_completed < MAX_ADAPTIVE_CYCLES
 
 
 # ---------------------------------------------------------------------------

@@ -30,6 +30,12 @@ Live checks (only if GROQ_API_KEY is set)
 import logging
 import subprocess
 import sys
+
+# LLM prose routinely contains non-ASCII punctuation (non-breaking hyphens,
+# curly quotes). Windows consoles default to cp1252 and raise
+# UnicodeEncodeError on those, which would abort a checkpoint mid-report.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 import tempfile
 from pathlib import Path
 

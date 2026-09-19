@@ -55,7 +55,14 @@ export function primaryMetric(taskType: TaskType | null | undefined): string {
   return taskType === "regression" ? "val_loss" : "accuracy";
 }
 
-/** Compact, stable description of an experiment configuration. */
+/**
+ * Compact, stable description of an experiment configuration.
+ *
+ * `epochs` is rendered as a quantity ("20 epochs") rather than `epochs=20`.
+ * It is configuration for ONE experiment — how many passes over the training
+ * data that single training run performs — and reading it as a bare number
+ * next to counts like "6 experiments" invites exactly the wrong reading.
+ */
 export function describeConfig(cfg: ExperimentConfiguration): string {
   if (cfg.model_type === "linear_baseline") {
     return `linear_baseline · seed=${cfg.random_seed}${
@@ -65,7 +72,9 @@ export function describeConfig(cfg: ExperimentConfiguration): string {
   const hp = cfg.hyperparameters ?? {};
   const parts = Object.keys(hp)
     .sort()
+    .filter((k) => k !== "epochs")
     .map((k) => `${k}=${hp[k]}`);
+  if (hp.epochs !== undefined) parts.push(`${hp.epochs} epochs`);
   parts.push(`seed=${cfg.random_seed}`);
   if (cfg.preprocessing.normalize) parts.push("norm");
   return `mlp · ${parts.join(" · ")}`;
@@ -75,8 +84,27 @@ export function comparisonLabel(c: StatisticalComparison): string {
   return `${c.condition_a_name} vs ${c.condition_b_name}`;
 }
 
+/** Plain-language note on which test produced a comparison. */
+export function testTypeLabel(c: StatisticalComparison): string {
+  return c.test_type === "one_sample_t"
+    ? "one-sample t-test (one condition is deterministic)"
+    : "two-sample t-test";
+}
+
+/**
+ * Render a backend timestamp in the viewer's own time zone (IST on an Indian
+ * machine) — never a hardcoded offset.
+ *
+ * The API sends explicitly-UTC ISO strings (`...+00:00`, see
+ * backend/models/timestamps.py), which `new Date()` converts correctly. The
+ * `Z` fallback below covers an offset-less string: JavaScript parses an ISO
+ * date-time with no offset as LOCAL time, which silently displayed UTC digits
+ * as if they were local ones — the bug this pair of changes fixes. Every
+ * timestamp this project stores is UTC, so assuming UTC is the safe reading.
+ */
 export function formatTimestamp(iso: string): string {
-  const d = new Date(iso);
+  const hasZone = /(?:Z|[+-]\d{2}:?\d{2})$/.test(iso);
+  const d = new Date(hasZone ? iso : `${iso}Z`);
   if (Number.isNaN(d.getTime())) return iso;
   return d.toLocaleString();
 }

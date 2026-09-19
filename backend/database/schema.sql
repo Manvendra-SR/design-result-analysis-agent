@@ -50,8 +50,20 @@ CREATE INDEX IF NOT EXISTS idx_datasets_created_at
 CREATE TABLE IF NOT EXISTS sessions (
     session_id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
     dataset_id              UUID        NOT NULL REFERENCES datasets (dataset_id),
+    -- The investigation this one follows up on, if any. Provenance ONLY:
+    -- experiments/anomalies/cycle_history are strictly scoped to their own
+    -- session_id, so a follow-up question can never inherit the previous
+    -- question's evidence.
+    parent_session_id       UUID
+                                REFERENCES sessions (session_id) ON DELETE SET NULL,
     research_question       TEXT        NOT NULL,
     status                  VARCHAR(20) NOT NULL DEFAULT 'active',
+    -- Why the investigation stopped, set when status becomes 'concluded':
+    --   'agent_concluded' - the Recommender judged the evidence sufficient
+    --   'cycle_limit'     - the MAX_ADAPTIVE_CYCLES safety cap stopped a loop
+    --                       that still wanted to continue. NOT a settled answer;
+    --                       the UI must present it differently.
+    termination_reason      VARCHAR(32) DEFAULT NULL,
     -- Tracks the current LangGraph node for crash recovery (Phase 5).
     -- Values: 'planning' | 'executing' | 'validating' | 'analyzing'
     --         | 'recommending' | 'concluded'
@@ -102,6 +114,9 @@ CREATE INDEX IF NOT EXISTS idx_sessions_created_at
 CREATE INDEX IF NOT EXISTS idx_sessions_dataset
     ON sessions (dataset_id);
 
+CREATE INDEX IF NOT EXISTS idx_sessions_parent
+    ON sessions (parent_session_id);
+
 -- ------------------------------------------------------------
 -- experiments
 -- One row per individual ML experiment run within a session.
@@ -119,7 +134,10 @@ CREATE TABLE IF NOT EXISTS experiments (
     task_type       VARCHAR(20) DEFAULT NULL,
     -- Metrics dict, keyed by task_type (classification: train_loss, val_loss,
     -- accuracy, n_classes, n_val_samples, training_time_seconds; regression:
-    -- train_loss, val_loss, training_time_seconds). NULL while pending/running.
+    -- train_loss, val_loss, training_time_seconds). mlp additionally records
+    -- initial_train_loss, best_epoch, epochs_ran, final_val_loss and
+    -- final_accuracy - its val_loss/accuracy are the best epoch's, not the
+    -- last one's (see backend/tools/trainers.py). NULL while pending/running.
     metrics         JSONB       DEFAULT NULL,
     -- 'pending' | 'running' | 'success' | 'failed' | 'anomalous'
     status          VARCHAR(20) NOT NULL DEFAULT 'pending',
@@ -161,8 +179,18 @@ CREATE TABLE IF NOT EXISTS anomalies (
     explanation     TEXT        NOT NULL,
     -- 'warning' | 'critical'
     severity        VARCHAR(20) NOT NULL,
+    -- Anomaly LIFECYCLE. Detection re-runs over every experiment in the session
+    -- on every cycle, so a flag raised against a 3-replicate group can be
+    -- withdrawn once the group grows and the value proves ordinary. Resolved
+    -- rows are KEPT (never deleted) so "what was flagged, and when it cleared"
+    -- stays in the history; resolved_cycle IS NULL means the flag is still open.
+    detected_cycle  INTEGER     DEFAULT NULL,
+    resolved_cycle  INTEGER     DEFAULT NULL,
     detected_at     TIMESTAMP   NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS idx_anomalies_experiment
     ON anomalies (experiment_id);
+
+CREATE INDEX IF NOT EXISTS idx_anomalies_open
+    ON anomalies (resolved_cycle);
