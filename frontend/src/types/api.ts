@@ -1,212 +1,140 @@
 /*
- * TypeScript mirrors of the backend Pydantic models (Phase 2/4/5/6).
- * Kept deliberately close to the Python field names so the API layer needs
- * no remapping.
+ * TypeScript mirrors of the backend Pydantic models. Field names match the
+ * Python ones so the API layer needs no remapping.
  */
 
 export type TaskType = "classification" | "regression";
-
-export interface PreprocessingConfig {
-  normalize: boolean;
-}
 
 export interface ExperimentConfiguration {
   dataset_id: string;
   model_type: "mlp" | "linear_baseline";
   hyperparameters: Record<string, number>;
-  preprocessing: PreprocessingConfig;
+  preprocessing: { normalize: boolean };
   random_seed: number;
 }
 
-export type ExperimentStatus = "success" | "failed" | "anomalous";
-
+/** One training run. `failed` = crashed or produced NaN/Inf. */
 export interface ExperimentResult {
   experiment_id: string;
   session_id: string;
+  round: number;
   config: ExperimentConfiguration;
-  task_type: TaskType | null;
-  metrics: Record<string, number> | null;
-  status: ExperimentStatus;
+  status: "ok" | "failed";
   error: string | null;
-  cycle: number | null;
-  timestamp: string;
+  metrics: Record<string, number> | null;
+  created_at: string;
 }
 
-export type AnomalyRule =
-  | "outlier_detection"
-  | "loss_divergence"
-  | "validation_collapse";
+/** A value of the factor under test. */
+export type Level = boolean | number | string;
 
-export interface AnomalyReport {
-  anomaly_id: string;
-  experiment_id: string;
-  rule: AnomalyRule;
-  explanation: string;
-  severity: "warning" | "critical";
-  /** Cycle whose validation node raised this flag. */
-  detected_cycle: number | null;
-  /**
-   * Cycle whose validation node withdrew it, or null while it still holds.
-   * Detection re-runs over all evidence each cycle, so a flag raised against
-   * a thin group can be cleared once the group grows.
-   */
-  resolved_cycle: number | null;
-  detected_at: string;
+export type Factor =
+  | "model_type"
+  | "normalize"
+  | "hidden_size"
+  | "dropout"
+  | "learning_rate"
+  | "batch_size"
+  | "epochs";
+
+export interface Plan {
+  factor: Factor;
+  levels: Level[];
+  reference: Level;
+  base: {
+    model_type: "mlp" | "linear_baseline";
+    hyperparameters: Record<string, number>;
+    normalize: boolean;
+  };
+  rationale: string;
 }
 
-/**
- * 'two_sample_t' — both conditions vary (the normal case).
- * 'one_sample_t' — one condition is deterministic (identical for every seed,
- * as linear_baseline is), so it is treated as a known constant to test the
- * other against rather than the comparison being abandoned.
- */
-export type StatisticalTestType = "two_sample_t" | "one_sample_t";
-
-export interface StatisticalComparison {
-  comparison_id: string;
-  condition_a_name: string;
-  condition_b_name: string;
-  metric: string;
-  test_type: StatisticalTestType;
-  t_statistic: number;
-  p_value: number;
-  effect_size: number;
-  confidence_interval: [number, number];
-  sample_sizes: [number, number];
-  warning: string | null;
+export interface Decision {
+  round: number;
+  action: "explore" | "conclude";
+  new_levels: Level[];
+  rationale: string;
+  decided_by: "agent" | "budget";
 }
 
-/** A condition pair the analysis node could not compare, and the real reason. */
-export interface ComparisonSkip {
-  condition_a_name: string;
-  condition_b_name: string;
-  metric: string;
-  reason_code: "insufficient_data" | "insufficient_variance";
-  reason: string;
-}
+export type Verdict = "better" | "worse" | "inconclusive";
+export type Metric = "accuracy" | "mse";
 
-/** Descriptive statistics for one condition, computed by the analysis node. */
 export interface ConditionSummary {
-  condition_name: string;
-  metric: string;
-  n_successful: number;
-  n_anomalous: number;
+  level: Level;
+  label: string;
+  is_reference: boolean;
+  n_ok: number;
   n_failed: number;
-  mean: number;
-  std: number;
-  min: number;
-  max: number;
-  /** std === 0 across replicates: random_seed has no effect on this model. */
-  deterministic: boolean;
+  mean: number | null;
+  seed_std: number | null;
 }
 
-export type RecommendationAction = "run_more_experiments" | "conclude";
-
-export interface Recommendation {
-  action: RecommendationAction;
-  recommended_experiments: ExperimentConfiguration[];
-  explanation: string;
-  evidence_summary: string;
-  timestamp: string;
+/** One level vs the reference: metric difference with a 95% bootstrap CI. */
+export interface Comparison {
+  level: Level;
+  label: string;
+  diff: number;
+  ci_low: number;
+  ci_high: number;
+  verdict: Verdict;
 }
 
-/** Whether a run-cycle is actually in progress — distinct from `status`. */
-export type RunPhase = "idle" | "running" | "failed";
+export interface Analysis {
+  split: "val" | "test";
+  metric: Metric;
+  higher_is_better: boolean;
+  n_rows: number;
+  majority_rate: number | null;
+  conditions: ConditionSummary[];
+  comparisons: Comparison[];
+}
 
-/**
- * Why an investigation stopped.
- * 'agent_concluded' — the Recommender judged the evidence sufficient.
- * 'cycle_limit' — the safety cap stopped a loop that still wanted more
- * experiments. That is NOT a settled answer and must be shown differently.
- */
-export type TerminationReason = "agent_concluded" | "cycle_limit";
+export interface Report {
+  challenger: string;
+  reference: string;
+  metric: Metric;
+  higher_is_better: boolean;
+  challenger_score: number;
+  reference_score: number;
+  comparison: Comparison;
+  majority_rate: number | null;
+  n_test_rows: number;
+  rounds_run: number;
+  stopped_by: "agent" | "budget";
+  headline: string;
+  interpretation: string | null;
+}
+
+export type SessionStatus = "pending" | "running" | "done" | "failed";
+
+export interface Session {
+  session_id: string;
+  dataset_id: string;
+  research_question: string;
+  status: SessionStatus;
+  error: string | null;
+  plan: Plan | null;
+  decisions: Decision[];
+  report: Report | null;
+  created_at: string;
+}
+
+export interface SessionDetail extends Session {
+  experiments: ExperimentResult[];
+  /** Validation-split statistics, recomputed on every request. */
+  analysis: Analysis | null;
+  max_rounds: number;
+  n_seeds: number;
+}
 
 export interface SessionSummary {
   session_id: string;
-  research_question: string;
-  status: string;
-  run_phase: RunPhase;
-  termination_reason: TerminationReason | null;
-  parent_session_id: string | null;
-  cycle_count: number;
-  experiment_count: number;
-  created_at: string;
-}
-
-/** Values of sessions.current_node — also the LangGraph node names. */
-export type WorkflowNode =
-  | "planning"
-  | "executing"
-  | "validating"
-  | "analyzing"
-  | "recommending"
-  | "concluded";
-
-export interface SessionDetail {
-  session_id: string;
   dataset_id: string;
-  parent_session_id: string | null;
   research_question: string;
-  status: string;
-  current_node: WorkflowNode;
-  run_phase: RunPhase;
-  run_error: string | null;
-  termination_reason: TerminationReason | null;
-  cycle_count: number;
+  status: SessionStatus;
   experiment_count: number;
-  /** The MAX_ADAPTIVE_CYCLES safety cap this session runs under. */
-  max_cycles: number;
-  plan_explanation: string | null;
   created_at: string;
-  updated_at: string;
-}
-
-export interface CreateSessionResponse {
-  session_id: string;
-  created_at: string;
-}
-
-export interface RunCycleResponse {
-  session_id: string;
-  current_node: WorkflowNode;
-  status: string;
-  run_phase: RunPhase;
-  termination_reason: TerminationReason | null;
-  cycles_completed: number;
-  experiments_completed: number;
-  recommendation: Recommendation | null;
-}
-
-/**
- * One adaptive cycle. Two scopes live here and must never be mixed in the UI:
- * PER-CYCLE (`experiments`, `anomalies_detected`, `anomalies_resolved`) is
- * what this cycle did; CUMULATIVE (`statistical_comparisons`,
- * `condition_summaries`, `recommendation`, `open_anomaly_count`) is the state
- * of the whole investigation as of this cycle.
- */
-export interface SessionCycle {
-  cycle_number: number;
-  plan_explanation: string | null;
-  /** PER-CYCLE: experiments (training runs) executed in this cycle. */
-  experiments: ExperimentResult[];
-  /** PER-CYCLE: flags this cycle's validation node raised. */
-  anomalies_detected: AnomalyReport[];
-  /** PER-CYCLE: flags this cycle's validation node withdrew. */
-  anomalies_resolved: AnomalyReport[];
-  /** CUMULATIVE: experiments in this and all earlier cycles. */
-  cumulative_experiment_count: number;
-  /** CUMULATIVE: flags still open at the end of this cycle. */
-  open_anomaly_count: number;
-  /** CUMULATIVE: analysis over all evidence so far. */
-  statistical_comparisons: StatisticalComparison[];
-  /** CUMULATIVE: pairs that could not be compared, with the real reason. */
-  skipped_comparisons: ComparisonSkip[];
-  /** CUMULATIVE: per-condition descriptive statistics. */
-  condition_summaries: ConditionSummary[];
-  /** CUMULATIVE decision, stored exactly as the agent produced it. */
-  recommendation: Recommendation | null;
-  continued: boolean;
-  termination_reason: TerminationReason | null;
 }
 
 export interface DatasetProfile {
@@ -236,14 +164,13 @@ export interface DatasetIngestRequest {
   task_type_override?: "classification" | "regression" | null;
 }
 
-/** The single error shape every failing endpoint returns (backend/api/errors.py). */
+/** The single error shape every failing endpoint returns. */
 export interface ApiError {
   error: string;
   message: string;
   details?: Record<string, unknown> | null;
 }
 
-/** Body returned by DELETE /api/sessions/{id} and DELETE /api/datasets/{id}. */
 export interface DeleteResult {
   deleted: "session" | "dataset";
   id: string;

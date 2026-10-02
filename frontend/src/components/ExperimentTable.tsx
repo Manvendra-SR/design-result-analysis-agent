@@ -4,41 +4,17 @@ import { describeConfig, formatTimestamp, num, pct } from "../lib/format";
 import type { ExperimentResult } from "../types/api";
 import { Badge, Card, Empty } from "./ui";
 
-function StatusBadge({ status }: { status: ExperimentResult["status"] }) {
-  return <span className={`status-pill status-pill--${status}`}>{status}</span>;
-}
-
-function metric(exp: ExperimentResult, key: string): string {
-  const v = exp.metrics?.[key];
-  if (v === undefined) return "—";
-  return key === "accuracy" ? pct(v) : num(v);
+function metricCell(exp: ExperimentResult): string {
+  if (!exp.metrics) return "—";
+  if (exp.metrics.accuracy !== undefined) return pct(exp.metrics.accuracy);
+  return num(exp.metrics.mse, 4);
 }
 
 /**
- * Which epoch the reported val_loss / accuracy come from. The mlp trainer runs
- * a fixed number of epochs and reports the best one (lowest validation loss),
- * so showing that epoch is the difference between a number the reader can
- * trust and one they have to guess at. linear_baseline has no epoch loop and
- * records neither key, hence the dash.
+ * Every training run, newest first. A row expands to the raw config / error.
+ * A `failed` run crashed or produced NaN/Inf; every other run is evidence.
  */
-function bestEpoch(exp: ExperimentResult): string {
-  const best = exp.metrics?.best_epoch;
-  const ran = exp.metrics?.epochs_ran;
-  if (best === undefined || ran === undefined) return "—";
-  return `${best} / ${ran}`;
-}
-
-/**
- * ExperimentTable (task 7.7). Newest first, colour-coded status, expandable
- * rows for the full config / error. Experiments are grouped by the adaptive
- * cycle that produced them (experiments.cycle) so the accumulation across
- * cycles is visible.
- */
-export function ExperimentTable({
-  experiments,
-}: {
-  experiments: ExperimentResult[];
-}) {
+export function ExperimentTable({ experiments }: { experiments: ExperimentResult[] }) {
   const [open, setOpen] = useState<Set<string>>(new Set());
 
   function toggle(id: string) {
@@ -51,91 +27,73 @@ export function ExperimentTable({
   }
 
   const sorted = [...experiments].sort(
-    (a, b) =>
-      (b.cycle ?? 0) - (a.cycle ?? 0) ||
-      new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime(),
+    (a, b) => b.round - a.round || b.created_at.localeCompare(a.created_at),
   );
-
-  const counts = {
-    success: experiments.filter((e) => e.status === "success").length,
-    anomalous: experiments.filter((e) => e.status === "anomalous").length,
-    failed: experiments.filter((e) => e.status === "failed").length,
-  };
+  const failed = experiments.filter((e) => e.status === "failed").length;
+  const metricName = experiments.find((e) => e.metrics)?.metrics?.mse !== undefined ? "val mse" : "val accuracy";
 
   return (
     <Card
-      title="Experiments"
+      title="Training runs"
       badge={<Badge variant="gradient">Computed</Badge>}
-      hint="One row = one experiment: a complete training run of one configuration. `epochs` is how many passes over the training data happen inside that single run — it is not a count of experiments."
+      hint="One row = one complete training run. Runs of the same condition differ only in their random seed."
       right={
         <span style={{ display: "flex", gap: 8 }}>
-          <Badge variant="ok">{counts.success} ok</Badge>
-          <Badge variant="warn">{counts.anomalous} anomalous</Badge>
-          <Badge variant="danger">{counts.failed} failed</Badge>
+          <Badge variant="ok">{experiments.length - failed} ok</Badge>
+          {failed > 0 && <Badge variant="danger">{failed} failed</Badge>}
         </span>
       }
     >
       {sorted.length === 0 ? (
-        <Empty>No experiments yet. Run the investigation to generate them.</Empty>
+        <Empty>No runs yet.</Empty>
       ) : (
         <div className="table-wrap">
           <table>
             <thead>
               <tr>
-                <th>Cycle</th>
+                <th className="num">Round</th>
                 <th>Configuration</th>
-                <th className="num">train_loss</th>
-                <th className="num">val_loss</th>
-                <th className="num">accuracy</th>
-                <th className="num" title="Epoch the reported val_loss / accuracy come from, out of the epochs run">
-                  best epoch
-                </th>
+                <th className="num">Seed</th>
+                <th className="num">{metricName}</th>
+                <th className="num">train loss</th>
+                <th className="num">time (s)</th>
                 <th>Status</th>
-                <th>When</th>
               </tr>
             </thead>
             <tbody>
-              {sorted.map((exp) => {
-                const isOpen = open.has(exp.experiment_id);
-                return (
-                  <Fragment key={exp.experiment_id}>
-                    <tr
-                      className="row-clickable"
-                      onClick={() => toggle(exp.experiment_id)}
-                    >
-                      <td className="num">{exp.cycle ?? "—"}</td>
-                      <td className="mono">{describeConfig(exp.config)}</td>
-                      <td className="num">{metric(exp, "train_loss")}</td>
-                      <td className="num">{metric(exp, "val_loss")}</td>
-                      <td className="num">{metric(exp, "accuracy")}</td>
-                      <td className="num">{bestEpoch(exp)}</td>
-                      <td>
-                        <StatusBadge status={exp.status} />
+              {sorted.map((exp) => (
+                <Fragment key={exp.experiment_id}>
+                  <tr className="row-clickable" onClick={() => toggle(exp.experiment_id)}>
+                    <td className="num">{exp.round}</td>
+                    <td className="mono">{describeConfig(exp.config)}</td>
+                    <td className="num">{exp.config.random_seed}</td>
+                    <td className="num">{metricCell(exp)}</td>
+                    <td className="num">{num(exp.metrics?.train_loss)}</td>
+                    <td className="num">{num(exp.metrics?.training_time_seconds, 1)}</td>
+                    <td>
+                      <span className={`status-pill status-pill--${exp.status}`}>{exp.status}</span>
+                    </td>
+                  </tr>
+                  {open.has(exp.experiment_id) && (
+                    <tr>
+                      <td className="detail-cell" colSpan={7}>
+                        <pre>
+                          {JSON.stringify(
+                            {
+                              config: exp.config,
+                              metrics: exp.metrics,
+                              error: exp.error,
+                              finished: formatTimestamp(exp.created_at),
+                            },
+                            null,
+                            2,
+                          )}
+                        </pre>
                       </td>
-                      <td>{formatTimestamp(exp.timestamp)}</td>
                     </tr>
-                    {isOpen && (
-                      <tr>
-                        <td className="detail-cell" colSpan={8}>
-                          <pre>
-                            {JSON.stringify(
-                              {
-                                experiment_id: exp.experiment_id,
-                                task_type: exp.task_type,
-                                config: exp.config,
-                                metrics: exp.metrics,
-                                error: exp.error,
-                              },
-                              null,
-                              2,
-                            )}
-                          </pre>
-                        </td>
-                      </tr>
-                    )}
-                  </Fragment>
-                );
-              })}
+                  )}
+                </Fragment>
+              ))}
             </tbody>
           </table>
         </div>

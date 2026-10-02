@@ -1,48 +1,21 @@
 """
 backend/models/experiment.py
 =============================
-Pydantic v2 data models for experiment configurations and results.
+One experiment = one complete training run of one configuration.
 
 ExperimentConfiguration
-    Complete specification for one ML experiment run against a profiled
-    Dataset. Used as input to Experiment_Runner and stored as JSONB in
-    PostgreSQL.
+    What to train: dataset, model type, hyperparameters, preprocessing, seed.
 
 ExperimentResult
-    Represents a *completed* experiment (status in success|failed|anomalous).
-    Returned by Experiment_Runner, stored and retrieved by StateManager.
+    What came out: ``status`` is ``ok`` or ``failed`` (crashed, or produced a
+    non-finite number). There is no third state - an unusual but valid result
+    is evidence and stays in the analysis.
 
-ExperimentPlan
-    A batch of configurations plus a natural-language rationale, produced by
-    the Phase 4 Experiment_Planner_Agent. The planner's analog of
-    ``Recommendation`` (see ``backend/models/recommendation.py``).
-
-Notes on JSONB round-trip
---------------------------
-``ExperimentConfiguration`` is serialised to a plain dict via
-``config.model_dump()`` before being stored in the JSONB ``config`` column.
-On retrieval from PostgreSQL the JSONB column is already a Python dict;
-``ExperimentConfiguration.model_validate(row.config)`` reconstructs it.
-``ExperimentResult`` uses ``ConfigDict(from_attributes=True)`` so it can also
-be constructed directly from a SQLAlchemy ORM row.
-
-Dataset-first architecture revision
--------------------------------------
-``model_type`` used to be ``Literal["mnist_mlp", "synthetic_regression"]`` -
-two hardcoded, dataset-specific problems. It is now ``Literal["mlp",
-"linear_baseline"]``: two model families that are dispatched by the
-referenced dataset's *task type*, not by a fixed dataset identity. Every
-configuration now carries ``dataset_id`` (see ``backend/models/dataset.py``)
-and a ``preprocessing`` choice. See DESIGN_REVIEW_CHANGES.md's "Architecture
-Revision" entry for the full rationale.
-
-Requirements
-------------
-2.1  Experiment_Planner_Agent generates Experiment_Configurations from a question
-2.4  Experiment_Planner_Agent specifies dataset/model/hyperparameters/seed explicitly
-3.1  Experiment_Runner executes configurations against a resolved Dataset
-3.5  Experiment_Runner returns metrics keyed by task_type
-4.3  State_Manager persists experiment configurations and results
+    Besides summary ``metrics``, each run keeps a per-row score for the
+    validation and test splits (1/0 correctness for classification, squared
+    error for regression). Those per-row scores are what the statistics
+    resample - see ``backend/tools/stats.py``. They are excluded from API
+    responses (thousands of numbers per run) but stored with the run.
 """
 
 from __future__ import annotations
@@ -56,275 +29,68 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from backend.models.dataset import PreprocessingConfig
 from backend.models.timestamps import UTCDateTime
 
+ModelType = Literal["mlp", "linear_baseline"]
 
-# ---------------------------------------------------------------------------
-# ExperimentConfiguration
-# ---------------------------------------------------------------------------
+#: Hyperparameters the MLP trainer reads, with the defaults it applies.
+MLP_DEFAULTS: Dict[str, float] = {
+    "hidden_size": 64,
+    "dropout": 0.0,
+    "learning_rate": 0.001,
+    "batch_size": 32,
+    "epochs": 20,
+}
+
+
 class ExperimentConfiguration(BaseModel):
-    """Complete specification for one ML experiment run against a dataset.
+    """Complete specification for one training run.
 
-    Supported model types
-    ---------------------
-    ``mlp``
-        Single-hidden-layer feed-forward network (``TabularMLP``), sized to
-        the referenced dataset's feature/class counts.
-        Hyperparameters: hidden_size (>0), dropout (0-1), learning_rate (>0),
-        batch_size (>0), epochs (>0).
-
-    ``linear_baseline``
-        Logistic or linear regression (scikit-learn), chosen by the
-        dataset's task type. No tunable hyperparameters.
-
-    Example
-    -------
-    >>> cfg = ExperimentConfiguration(
-    ...     dataset_id="3fa85f64-5717-4562-b3fc-2c963f66afa6",
-    ...     model_type="mlp",
-    ...     hyperparameters={"dropout": 0.2, "learning_rate": 0.001, "batch_size": 32},
-    ...     random_seed=42,
-    ... )
+    ``mlp`` reads ``hidden_size``, ``dropout``, ``learning_rate``,
+    ``batch_size`` and ``epochs`` (defaults in ``MLP_DEFAULTS``).
+    ``linear_baseline`` (logistic / linear regression) has no hyperparameters.
     """
 
     dataset_id: str
-    model_type: Literal["mlp", "linear_baseline"]
+    model_type: ModelType
     hyperparameters: Dict[str, float] = Field(default_factory=dict)
     preprocessing: PreprocessingConfig = Field(default_factory=PreprocessingConfig)
-    random_seed: int
+    random_seed: int = 0
 
-    model_config = ConfigDict(
-        protected_namespaces=(),  # 'model_type' is a domain field, not a Pydantic namespace
-        json_schema_extra={
-            "example": {
-                "dataset_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
-                "model_type": "mlp",
-                "hyperparameters": {
-                    "dropout": 0.2,
-                    "learning_rate": 0.001,
-                    "batch_size": 32,
-                    "hidden_size": 64,
-                    "epochs": 20,
-                },
-                "preprocessing": {"normalize": False},
-                "random_seed": 42,
-            }
-        }
-    )
+    model_config = ConfigDict(protected_namespaces=())  # 'model_type' is a domain field
 
     @model_validator(mode="after")
     def _validate_hyperparameters(self) -> "ExperimentConfiguration":
-        """Validate hyperparameter ranges based on model_type.
-
-        ``linear_baseline`` has no tunable hyperparameters, so it has
-        nothing to validate here - any values passed are simply ignored by
-        the trainer.
-        """
         hp = self.hyperparameters
-
-        if self.model_type == "mlp":
-            if "dropout" in hp and not (0.0 <= hp["dropout"] <= 1.0):
-                raise ValueError(f"dropout must be in [0, 1], got {hp['dropout']}")
-            if "learning_rate" in hp and hp["learning_rate"] <= 0:
-                raise ValueError(
-                    f"learning_rate must be > 0, got {hp['learning_rate']}"
-                )
-            if "batch_size" in hp and hp["batch_size"] <= 0:
-                raise ValueError(f"batch_size must be > 0, got {hp['batch_size']}")
-            if "hidden_size" in hp and hp["hidden_size"] <= 0:
-                raise ValueError(f"hidden_size must be > 0, got {hp['hidden_size']}")
-            if "epochs" in hp and hp["epochs"] <= 0:
-                raise ValueError(f"epochs must be > 0, got {hp['epochs']}")
-
+        if self.model_type == "linear_baseline":
+            return self
+        unknown = set(hp) - set(MLP_DEFAULTS)
+        if unknown:
+            raise ValueError(f"unknown mlp hyperparameter(s): {sorted(unknown)}")
+        if "dropout" in hp and not 0.0 <= hp["dropout"] < 1.0:
+            raise ValueError(f"dropout must be in [0, 1), got {hp['dropout']}")
+        if "learning_rate" in hp and not 0.0 < hp["learning_rate"] <= 1.0:
+            raise ValueError(f"learning_rate must be in (0, 1], got {hp['learning_rate']}")
+        if "hidden_size" in hp and not 1 <= hp["hidden_size"] <= 512:
+            raise ValueError(f"hidden_size must be in [1, 512], got {hp['hidden_size']}")
+        if "batch_size" in hp and not 1 <= hp["batch_size"] <= 4096:
+            raise ValueError(f"batch_size must be in [1, 4096], got {hp['batch_size']}")
+        if "epochs" in hp and not 1 <= hp["epochs"] <= 100:
+            raise ValueError(f"epochs must be in [1, 100], got {hp['epochs']}")
         return self
 
 
-# ---------------------------------------------------------------------------
-# ExperimentResult
-# ---------------------------------------------------------------------------
 class ExperimentResult(BaseModel):
-    """Represents a *completed* experiment stored in PostgreSQL.
+    """A finished training run."""
 
-    This model covers the terminal states only:
-    - ``success``  : training completed normally
-    - ``failed``   : training raised an exception (``error`` is populated)
-    - ``anomalous``: experiment was flagged by Anomaly_Detector after completion
-
-    The intermediate states (``pending``, ``running``) exist only in the
-    database and are managed internally by StateManager; they never appear
-    in this Pydantic model.
-
-    Metrics are keyed by task_type, not model_type
-    -------------------------------------------------
-    ``metrics`` is ``None`` when ``status == "failed"``. Otherwise its keys
-    depend on ``task_type``, not on which model produced it - this is what
-    makes ``mlp`` and ``linear_baseline`` results on the same dataset
-    directly comparable:
-
-    - ``classification``: ``train_loss``, ``val_loss``, ``accuracy``,
-      ``n_classes``, ``n_val_samples``, ``training_time_seconds``
-      (+ ``initial_train_loss``, ``best_epoch``, ``epochs_ran``,
-      ``final_val_loss``, ``final_accuracy`` for ``mlp`` only - no epoch loop
-      for ``linear_baseline``). ``val_loss``/``accuracy`` are the BEST epoch's
-      (lowest validation loss); the last epoch's are kept separately as
-      ``final_val_loss``/``final_accuracy``. See ``tools/trainers.py``.
-    - ``regression``: ``train_loss``, ``val_loss``, ``training_time_seconds``
-      - no ``accuracy`` key at all (replaces the old "accuracy=0.0 by
-      convention" approach)
-
-    ORM round-trip
-    --------------
-    ``ConfigDict(from_attributes=True)`` allows constructing this model from
-    a SQLAlchemy ORM row via::
-
-        ExperimentResult.model_validate(orm_row, from_attributes=True)
-
-    Requirements covered: 3.5, 4.3
-    """
-
-    experiment_id: str = Field(
-        default_factory=lambda: str(uuid.uuid4()),
-        description="UUID primary key",
-    )
-    session_id: str = Field(description="FK to sessions table")
-    config: ExperimentConfiguration = Field(
-        description="Full ExperimentConfiguration (stored as JSONB)"
-    )
-    task_type: Optional[Literal["classification", "regression"]] = Field(
-        default=None,
-        description="The dataset's task type at the time this experiment ran",
-    )
+    experiment_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    session_id: str
+    round: int = Field(description="1-based investigation round that ran this experiment")
+    config: ExperimentConfiguration
+    status: Literal["ok", "failed"]
+    error: Optional[str] = None
     metrics: Optional[Dict[str, float]] = Field(
         default=None,
-        description="Training metrics, keyed by task_type; None when status='failed'",
+        description="Validation metric (accuracy or mse), train_loss, training_time_seconds",
     )
-    status: Literal["success", "failed", "anomalous"] = Field(
-        description="Terminal experiment status"
-    )
-    error: Optional[str] = Field(
-        default=None,
-        description="Error message when status='failed'",
-    )
-    cycle: Optional[int] = Field(
-        default=None,
-        description=(
-            "1-based adaptive cycle that produced this experiment (set by the "
-            "execution node). None for experiments stored outside the loop."
-        ),
-    )
-    timestamp: UTCDateTime = Field(
-        default_factory=datetime.utcnow,
-        description="Experiment run timestamp (UTC)",
-    )
-
-    model_config = ConfigDict(
-        from_attributes=True,
-        json_schema_extra={
-            "example": {
-                "experiment_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
-                "session_id": "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
-                "config": {
-                    "dataset_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
-                    "model_type": "mlp",
-                    "hyperparameters": {
-                        "dropout": 0.2,
-                        "learning_rate": 0.001,
-                        "batch_size": 32,
-                        "hidden_size": 64,
-                        "epochs": 20,
-                    },
-                    "preprocessing": {"normalize": False},
-                    "random_seed": 42,
-                },
-                "task_type": "classification",
-                "metrics": {
-                    "train_loss": 0.15,
-                    "val_loss": 0.18,
-                    "accuracy": 0.94,
-                    "n_classes": 2,
-                    "n_val_samples": 120,
-                    "training_time_seconds": 12.5,
-                },
-                "status": "success",
-                "error": None,
-                "timestamp": "2024-01-15T10:30:00Z",
-            }
-        },
-    )
-
-
-# ---------------------------------------------------------------------------
-# ExperimentPlan
-# ---------------------------------------------------------------------------
-class ExperimentPlan(BaseModel):
-    """Initial experiment plan produced by the Phase 4 Experiment_Planner_Agent.
-
-    The planner's analog of ``Recommendation`` (Phase 4 Recommender_Agent):
-    a batch of configurations to execute plus a natural-language rationale
-    for the experimental design.
-
-    Not persisted as a unit - the Phase 5 LangGraph planning node stores the
-    individual ``experiments`` as rows in the ``experiments`` table and
-    discards the wrapper. ``explanation`` is LLM-generated and is labelled
-    "Interpretation" in the UI (Requirement 12.5).
-
-    ``total_count`` is kept in sync with ``len(experiments)`` by a validator,
-    so callers may omit it.
-
-    Requirements covered: 2.1, 2.2, 2.4, 2.7
-    """
-
-    experiments: List[ExperimentConfiguration] = Field(
-        description="Configurations to execute, varying one factor at a time"
-    )
-    explanation: str = Field(
-        description="LLM rationale for the experimental design (labelled 'Interpretation' in UI)"
-    )
-    total_count: int = Field(
-        default=0,
-        description="Number of configurations in the plan; synced to len(experiments)",
-    )
-
-    model_config = ConfigDict(
-        json_schema_extra={
-            "example": {
-                "experiments": [
-                    {
-                        "dataset_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
-                        "model_type": "mlp",
-                        "hyperparameters": {
-                            "dropout": 0.0,
-                            "learning_rate": 0.001,
-                            "batch_size": 32,
-                            "hidden_size": 64,
-                            "epochs": 20,
-                        },
-                        "preprocessing": {"normalize": False},
-                        "random_seed": 42,
-                    },
-                    {
-                        "dataset_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
-                        "model_type": "mlp",
-                        "hyperparameters": {
-                            "dropout": 0.2,
-                            "learning_rate": 0.001,
-                            "batch_size": 32,
-                            "hidden_size": 64,
-                            "epochs": 20,
-                        },
-                        "preprocessing": {"normalize": False},
-                        "random_seed": 42,
-                    },
-                ],
-                "explanation": (
-                    "Varying dropout (0.0 vs 0.2) with 3 seeds each, holding "
-                    "all other hyperparameters fixed, to isolate its effect "
-                    "on validation accuracy."
-                ),
-                "total_count": 2,
-            }
-        }
-    )
-
-    @model_validator(mode="after")
-    def _sync_total_count(self) -> "ExperimentPlan":
-        self.total_count = len(self.experiments)
-        return self
+    val_scores: Optional[List[float]] = Field(default=None, exclude=True)
+    test_scores: Optional[List[float]] = Field(default=None, exclude=True)
+    created_at: UTCDateTime = Field(default_factory=datetime.utcnow)

@@ -1,23 +1,38 @@
 """
 backend/api/dependencies.py
 =============================
-FastAPI dependency providers.
+FastAPI dependencies. Tests replace them via ``app.dependency_overrides``.
 
-``get_context`` is a lazily-built singleton ``StateMachineContext`` (real
-``StateManager`` + agents + tools). It is created on the first request that
-needs it, not at import time, so ``import backend.api.app`` works without a
-database or Groq. Tests swap it out with
-``app.dependency_overrides[get_context] = lambda: <stub context>``.
+get_repository        the process-wide Repository (connects on first use)
+get_investigator      ``session_id -> None``: runs one investigation to the end
 """
 
 from __future__ import annotations
 
 from functools import lru_cache
+from typing import Callable
 
-from backend.state_machine.context import StateMachineContext
+from backend.agents.llm import GroqClient, LLMError
+from backend.agents.planner import Planner
+from backend.agents.recommender import Recommender
+from backend.database.repository import Repository
+from backend.state_machine.graph import run_investigation
 
 
 @lru_cache(maxsize=1)
-def get_context() -> StateMachineContext:
-    """Return the process-wide ``StateMachineContext`` (built once, on first use)."""
-    return StateMachineContext.create_default()
+def get_repository() -> Repository:
+    return Repository()
+
+
+def _investigate(session_id: str) -> None:
+    repo = get_repository()
+    try:
+        llm = GroqClient()
+    except LLMError as exc:  # e.g. no API key: show it on the session instead of crashing
+        repo.set_status(session_id, "failed", error=str(exc))
+        return
+    run_investigation(session_id, repo, Planner(llm), Recommender(llm))
+
+
+def get_investigator() -> Callable[[str], None]:
+    return _investigate

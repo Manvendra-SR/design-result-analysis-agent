@@ -1,341 +1,155 @@
 """
 backend/tools/trainers.py
 ============================
-Deterministic training routines for the two supported models: ``mlp``
-(generic feed-forward network, PyTorch) and ``linear_baseline``
-(logistic/linear regression, scikit-learn), both executed against a
-resolved ``DatasetProfile`` rather than a hardcoded data source.
+Training routines for the two supported models, against any profiled dataset:
 
-Both functions are pure with respect to ``(ExperimentConfiguration,
-DatasetProfile)`` in, ``ExperimentResult`` out — they do not catch
-exceptions (that is ``ExperimentRunner``'s job) and they do not touch the
-database (that is ``StateManager``'s job).
+- ``mlp``             : ``TabularMLP`` (PyTorch), fixed number of epochs
+- ``linear_baseline`` : LogisticRegression / LinearRegression (scikit-learn)
 
-Metrics contract: keyed by task_type, not model_type
--------------------------------------------------------
-So that ``mlp`` and ``linear_baseline`` results on the same dataset are
-directly comparable ("which of these configurations performs best?"):
+Both use the same fixed train/val/test split and preprocessing, and both
+return the same thing, so their results are directly comparable:
 
-- ``classification``: ``train_loss``, ``val_loss``, ``accuracy``,
-  ``n_classes``, ``n_val_samples``, ``training_time_seconds``
-  (+ ``initial_train_loss``, ``best_epoch``, ``epochs_ran``,
-  ``final_val_loss``, ``final_accuracy`` for ``mlp`` only)
-- ``regression``: ``train_loss``, ``val_loss``, ``training_time_seconds``
-  — no ``accuracy`` key at all (replaces the old "accuracy=0.0 by
-  convention" approach; regression results never fake a classification metric)
+- ``metrics``     : the validation metric (``accuracy`` for classification,
+                    ``mse`` for regression), ``train_loss``, ``training_time_seconds``
+- ``val_scores``  : one score per validation row
+- ``test_scores`` : one score per test row (sealed until the final report)
 
-Which epoch the reported metrics come from
----------------------------------------------
-``mlp`` trains for a fixed ``epochs`` and evaluates the validation split after
-every epoch. The reported ``val_loss`` / ``accuracy`` are the **best epoch's**
-(lowest validation loss), not the last epoch's - the standard early-stopping
-choice, and the honest one: scoring a run that peaked at epoch 8 by its
-overfitted epoch-20 state measures the epoch budget, not the configuration
-under test. No weights are restored and training is never cut short, so this
-costs nothing: the per-epoch validation pass already ran.
+A per-row score is 1.0/0.0 (correct or not) for classification and the
+squared error for regression. The statistics resample these rows.
 
-The last epoch's values are kept alongside as ``final_val_loss`` /
-``final_accuracy``, with ``best_epoch`` saying where the best one was, so the
-gap between "best" and "final" - i.e. how much the run overfitted - stays
-visible instead of being silently absorbed. Selection and reporting both use
-the validation split, so the reported figure is mildly optimistic in absolute
-terms; the selection rule is identical for every condition, so comparisons
-between conditions remain fair, which is what this system actually reports on.
-``linear_baseline`` has no epoch loop, so best and final coincide and it emits
-neither key.
+``config.random_seed`` governs weight init, dropout and batch order only; the
+split is fixed per dataset (``DatasetProfile.split_seed``).
 
-Seed vs. split
----------------
-``config.random_seed`` governs model init / batch shuffling only.
-``dataset_profile.split_seed`` (fixed once per dataset — see
-``backend/tools/dataset/splitting.py``) governs the train/val/test split,
-so multi-seed comparisons vary training randomness only, never which rows
-end up in validation.
-
-``linear_baseline``'s "loss"
--------------------------------
-scikit-learn's ``LogisticRegression``/``LinearRegression`` have no epoch
-loop, so there is no natural per-epoch "loss" the way there is for ``mlp``.
-For classification, log-loss (the same cross-entropy quantity
-``nn.CrossEntropyLoss`` optimizes) is used via ``sklearn.metrics.log_loss``
-on predicted probabilities, so ``train_loss``/``val_loss`` stay meaningful
-and comparable in kind to ``mlp``'s. For regression, MSE is used, matching
-``nn.MSELoss``. Neither model sets ``initial_train_loss`` — the same
-convention previously used to skip the loss-divergence check for the old
-synthetic-regression trainer, generalized to any single-shot fit.
-
-Requirements
-------------
-3.1  mlp and linear_baseline both execute against a resolved Dataset
-3.3  mlp: configurable hidden_size, dropout, learning_rate, batch_size, epochs
-3.4  linear_baseline: LogisticRegression/LinearRegression, no tunable hyperparameters
-3.5  Metrics keyed by task_type, not model_type
-3.8  random_seed governs model init / training randomness only
+The MLP trains on CUDA when a GPU is available, otherwise on CPU.
 """
 
 from __future__ import annotations
 
-import logging
-import math
 import time
-from typing import List, Tuple
+from typing import Dict, List, NamedTuple
 
 import numpy as np
 import torch
 import torch.nn as nn
 from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.metrics import log_loss
-from torch.utils.data import DataLoader, TensorDataset
 
 from backend.models.dataset import DatasetProfile
-from backend.models.experiment import ExperimentConfiguration, ExperimentResult
+from backend.models.experiment import MLP_DEFAULTS, ExperimentConfiguration
 from backend.tools.dataset.dataset import Dataset
 from backend.tools.models import TabularMLP
 
-logger = logging.getLogger(__name__)
+
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
 
 
-def _loss_window_endpoints(epoch_losses: List[float]) -> Tuple[float, float]:
-    """Return (initial_loss, final_loss) bounding the final 20% of epochs.
-
-    The window covers ``ceil(0.2 * n_epochs)`` epochs, and ``initial_loss``
-    is the loss immediately preceding that window — generalizes to any
-    epoch count (unchanged from the original Phase 3 implementation).
-    """
-    n = len(epoch_losses)
-    if n == 0:
-        return 0.0, 0.0
-    if n == 1:
-        return epoch_losses[0], epoch_losses[0]
-    window_size = max(1, math.ceil(0.2 * n))
-    initial_idx = max(0, n - window_size - 1)
-    return epoch_losses[initial_idx], epoch_losses[-1]
+class TrainOutput(NamedTuple):
+    metrics: Dict[str, float]
+    val_scores: List[float]
+    test_scores: List[float]
 
 
-def train_mlp(
-    config: ExperimentConfiguration,
-    dataset_profile: DatasetProfile,
-    session_id: str = "",
-) -> ExperimentResult:
-    """Train a ``TabularMLP`` per ``config`` against ``dataset_profile``.
+def row_scores(predictions: np.ndarray, targets: np.ndarray, task_type: str) -> np.ndarray:
+    """Per-row score: correctness for classification, squared error for regression."""
+    if task_type == "classification":
+        return (predictions == targets).astype(float)
+    return (predictions - targets).astype(float) ** 2
 
-    Hyperparameters read from ``config.hyperparameters`` (defaults applied
-    for keys the caller omits): ``hidden_size`` (64), ``dropout`` (0.0),
-    ``learning_rate`` (0.001), ``batch_size`` (32), ``epochs`` (20).
 
-    Does not catch exceptions; ``ExperimentRunner`` turns a raised
-    exception into a ``status="failed"`` result.
-
-    Parameters
-    ----------
-    config:
-        Must have ``model_type == "mlp"``.
-    dataset_profile:
-        The dataset referenced by ``config.dataset_id``, already resolved
-        by the caller (this function never touches the database).
-    session_id:
-        Passed through into the returned ``ExperimentResult``.
-
-    Requirements: 3.1, 3.3, 3.5, 3.8
-    """
-    hp = config.hyperparameters
-    hidden_size = int(hp.get("hidden_size", 64))
-    dropout = float(hp.get("dropout", 0.0))
-    learning_rate = float(hp.get("learning_rate", 0.001))
-    batch_size = int(hp.get("batch_size", 32))
-    epochs = int(hp.get("epochs", 20))
-
-    # Seed before anything random-dependent so the whole run is reproducible.
-    # This governs model init / batch shuffling only — the train/val/test
-    # split itself comes from dataset_profile.split_seed (see module docstring).
-    torch.manual_seed(config.random_seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    split = Dataset(dataset_profile).load_split(normalize=config.preprocessing.normalize)
-
-    is_classification = dataset_profile.task_type == "classification"
-    output_dim = dataset_profile.n_classes if is_classification else 1
-
-    x_train_t = torch.tensor(split.x_train, dtype=torch.float32)
-    x_val_t = torch.tensor(split.x_val, dtype=torch.float32)
-    if is_classification:
-        y_train_t = torch.tensor(split.y_train, dtype=torch.long)
-        y_val_t = torch.tensor(split.y_val, dtype=torch.long)
-    else:
-        y_train_t = torch.tensor(split.y_train, dtype=torch.float32)
-        y_val_t = torch.tensor(split.y_val, dtype=torch.float32)
-
-    train_loader = DataLoader(
-        TensorDataset(x_train_t, y_train_t),
-        batch_size=batch_size,
-        shuffle=True,
-        generator=torch.Generator().manual_seed(config.random_seed),
+def _output(task_type, val_scores, test_scores, train_loss, seconds) -> TrainOutput:
+    metric = "accuracy" if task_type == "classification" else "mse"
+    return TrainOutput(
+        metrics={
+            metric: float(np.mean(val_scores)),
+            "train_loss": float(train_loss),
+            "training_time_seconds": float(seconds),
+        },
+        val_scores=val_scores.tolist(),
+        test_scores=test_scores.tolist(),
     )
 
-    # Reseed immediately before model construction, matching the original
-    # MNIST trainer's defensive pattern: keeps weight init decoupled from
-    # anything upstream that might have consumed the global torch RNG.
-    torch.manual_seed(config.random_seed)
+
+def train_mlp(config: ExperimentConfiguration, profile: DatasetProfile) -> TrainOutput:
+    hp = {**MLP_DEFAULTS, **config.hyperparameters}
+    is_classification = profile.task_type == "classification"
+    split = Dataset(profile).load_split(normalize=config.preprocessing.normalize)
+
+    # The whole training set lives on the device and batches are taken by index,
+    # so there is no per-batch host-to-GPU copy. Shuffling uses a CPU generator
+    # seeded per run, so batch order is identical on CPU and GPU.
+    target_dtype = torch.long if is_classification else torch.float32
+    x_train = torch.tensor(split.x_train, dtype=torch.float32, device=DEVICE)
+    y_train = torch.tensor(split.y_train, dtype=target_dtype, device=DEVICE)
+    batch_size = int(hp["batch_size"])
+    shuffle = torch.Generator().manual_seed(config.random_seed)
+
+    torch.manual_seed(config.random_seed)  # weight init + dropout masks (CPU and CUDA)
     model = TabularMLP(
-        input_dim=dataset_profile.n_features,
-        output_dim=output_dim,
-        hidden_size=hidden_size,
-        dropout=dropout,
-    ).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-    criterion: nn.Module = nn.CrossEntropyLoss() if is_classification else nn.MSELoss()
-
-    epoch_train_losses: List[float] = []
-    val_loss = 0.0
-    accuracy = 0.0
-    # Best-epoch (early-stopping) selection - see the module docstring. The
-    # per-epoch validation pass already runs, so keeping the best costs nothing.
-    best_val_loss = float("inf")
-    best_accuracy = 0.0
-    best_epoch = 0
-
-    x_val_device = x_val_t.to(device)
-    y_val_device = y_val_t.to(device)
+        input_dim=profile.n_features,
+        output_dim=profile.n_classes if is_classification else 1,
+        hidden_size=int(hp["hidden_size"]),
+        dropout=float(hp["dropout"]),
+    ).to(DEVICE)
+    optimizer = torch.optim.Adam(model.parameters(), lr=float(hp["learning_rate"]))
+    criterion = nn.CrossEntropyLoss() if is_classification else nn.MSELoss()
 
     start = time.perf_counter()
-    for epoch in range(epochs):
+    train_loss = float("nan")
+    n = len(x_train)
+    for _ in range(int(hp["epochs"])):
         model.train()
-        running_loss = 0.0
-        n_batches = 0
-        for x_batch, y_batch in train_loader:
-            x_batch, y_batch = x_batch.to(device), y_batch.to(device)
+        order = torch.randperm(n, generator=shuffle).to(DEVICE)
+        total = torch.zeros((), device=DEVICE)
+        for i in range(0, n, batch_size):
+            idx = order[i:i + batch_size]
             optimizer.zero_grad()
-            outputs = model(x_batch)
-            loss = criterion(outputs, y_batch)
+            loss = criterion(model(x_train[idx]), y_train[idx])
             loss.backward()
             optimizer.step()
-            running_loss += loss.item()
-            n_batches += 1
-        epoch_train_loss = running_loss / max(n_batches, 1)
-        epoch_train_losses.append(epoch_train_loss)
+            total += loss.detach() * len(idx)
+        train_loss = (total / n).item()  # one device sync per epoch, not per batch
+    seconds = time.perf_counter() - start
 
-        model.eval()
+    model.eval()
+
+    def predict(x: np.ndarray) -> np.ndarray:
         with torch.no_grad():
-            val_outputs = model(x_val_device)
-            val_loss = float(criterion(val_outputs, y_val_device).item())
-            if is_classification:
-                preds = val_outputs.argmax(dim=1)
-                accuracy = float((preds == y_val_device).float().mean().item())
+            out = model(torch.tensor(x, dtype=torch.float32, device=DEVICE))
+        return (out.argmax(dim=1) if is_classification else out).cpu().numpy()
 
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            best_accuracy = accuracy
-            best_epoch = epoch + 1  # 1-based, as a human counts epochs
-
-        logger.debug(
-            "mlp epoch %d/%d: train_loss=%.4f val_loss=%.4f",
-            epoch + 1, epochs, epoch_train_loss, val_loss,
-        )
-
-    training_time = time.perf_counter() - start
-    initial_train_loss, final_train_loss = _loss_window_endpoints(epoch_train_losses)
-    if best_epoch == 0:  # defensive: no epoch completed, nothing to select from
-        best_val_loss, best_accuracy = val_loss, accuracy
-
-    metrics = {
-        # train_loss stays the END-of-training value: it exists to be read
-        # against initial_train_loss by the loss-divergence rule, which is a
-        # statement about the last 20% of epochs, not about the best one.
-        "train_loss": final_train_loss,
-        # val_loss / accuracy are the BEST epoch's, not the last one's.
-        "val_loss": best_val_loss,
-        "training_time_seconds": training_time,
-        "initial_train_loss": initial_train_loss,
-        "best_epoch": float(best_epoch),
-        "epochs_ran": float(epochs),
-        "final_val_loss": val_loss,
-    }
-    if is_classification:
-        metrics["accuracy"] = best_accuracy
-        metrics["final_accuracy"] = accuracy
-        metrics["n_classes"] = float(dataset_profile.n_classes)
-        metrics["n_val_samples"] = float(len(split.y_val))
-
-    logger.info(
-        "mlp training complete: dataset=%s hidden_size=%d dropout=%.2f lr=%.4f "
-        "batch_size=%d epochs=%d seed=%d -> val_loss=%.4f at epoch %d/%d "
-        "(final-epoch val_loss=%.4f) (%.1fs)",
-        dataset_profile.dataset_id, hidden_size, dropout, learning_rate,
-        batch_size, epochs, config.random_seed, best_val_loss, best_epoch,
-        epochs, val_loss, training_time,
-    )
-
-    return ExperimentResult(
-        session_id=session_id,
-        config=config,
-        task_type=dataset_profile.task_type,
-        metrics=metrics,
-        status="success",
+    return _output(
+        profile.task_type,
+        row_scores(predict(split.x_val), split.y_val, profile.task_type),
+        row_scores(predict(split.x_test), split.y_test, profile.task_type),
+        train_loss,
+        seconds,
     )
 
 
-def train_linear_baseline(
-    config: ExperimentConfiguration,
-    dataset_profile: DatasetProfile,
-    session_id: str = "",
-) -> ExperimentResult:
-    """Fit a scikit-learn LogisticRegression/LinearRegression baseline.
-
-    Dispatched by ``dataset_profile.task_type``. No tunable hyperparameters
-    — ``config.hyperparameters`` is ignored. Uses the same Dataset/
-    preprocessing pipeline as ``train_mlp``, so results are directly
-    comparable.
-
-    Requirements: 3.1, 3.4, 3.5
-    """
-    split = Dataset(dataset_profile).load_split(normalize=config.preprocessing.normalize)
-    is_classification = dataset_profile.task_type == "classification"
+def train_linear_baseline(config: ExperimentConfiguration, profile: DatasetProfile) -> TrainOutput:
+    split = Dataset(profile).load_split(normalize=config.preprocessing.normalize)
+    is_classification = profile.task_type == "classification"
 
     start = time.perf_counter()
     if is_classification:
-        model = LogisticRegression(max_iter=1000, random_state=config.random_seed)
+        model = LogisticRegression(max_iter=1000)
         model.fit(split.x_train, split.y_train)
-
-        class_ids = list(range(dataset_profile.n_classes))
-        train_loss = float(
-            log_loss(split.y_train, model.predict_proba(split.x_train), labels=class_ids)
-        )
-        val_loss = float(
-            log_loss(split.y_val, model.predict_proba(split.x_val), labels=class_ids)
-        )
-        accuracy = float(model.score(split.x_val, split.y_val))
+        train_loss = log_loss(split.y_train, model.predict_proba(split.x_train), labels=model.classes_)
     else:
         model = LinearRegression()
         model.fit(split.x_train, split.y_train)
         train_loss = float(np.mean((model.predict(split.x_train) - split.y_train) ** 2))
-        val_loss = float(np.mean((model.predict(split.x_val) - split.y_val) ** 2))
+    seconds = time.perf_counter() - start
 
-    training_time = time.perf_counter() - start
-
-    metrics = {
-        "train_loss": train_loss,
-        "val_loss": val_loss,
-        "training_time_seconds": training_time,
-    }
-    if is_classification:
-        metrics["accuracy"] = accuracy
-        metrics["n_classes"] = float(dataset_profile.n_classes)
-        metrics["n_val_samples"] = float(len(split.y_val))
-
-    logger.info(
-        "linear_baseline training complete: dataset=%s task_type=%s seed=%d "
-        "-> val_loss=%.4f (%.4fs)",
-        dataset_profile.dataset_id, dataset_profile.task_type,
-        config.random_seed, val_loss, training_time,
+    return _output(
+        profile.task_type,
+        row_scores(model.predict(split.x_val), split.y_val, profile.task_type),
+        row_scores(model.predict(split.x_test), split.y_test, profile.task_type),
+        train_loss,
+        seconds,
     )
 
-    return ExperimentResult(
-        session_id=session_id,
-        config=config,
-        task_type=dataset_profile.task_type,
-        metrics=metrics,
-        status="success",
-    )
+
+TRAINERS = {"mlp": train_mlp, "linear_baseline": train_linear_baseline}

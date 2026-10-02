@@ -8,9 +8,17 @@ import {
 } from "../hooks/queries";
 import { formatTimestamp } from "../lib/format";
 import { apiErrorMessage } from "../services/api";
+import type { SessionStatus } from "../types/api";
 import { Badge, Card, Empty, ErrorBox, QueryState, SectionEyebrow } from "./ui";
 
 const MAX_QUESTION = 500;
+
+const STATUS_BADGE: Record<SessionStatus, "muted" | "warn" | "ok" | "danger"> = {
+  pending: "muted",
+  running: "warn",
+  done: "ok",
+  failed: "danger",
+};
 
 /**
  * SessionManager — "Start investigation" form + the list of past
@@ -74,7 +82,7 @@ export function SessionManager({
       <SectionEyebrow step={2}>Start an investigation</SectionEyebrow>
       <Card
         title="Ask a question about your dataset"
-        hint="One investigation pairs a research question with a dataset. The agent then plans, runs, and analyses experiments until it can answer."
+        hint="One investigation pairs a research question with a dataset. The agent designs a controlled experiment, runs it, and reports the answer with a confidence interval."
       >
         <form onSubmit={submit}>
           <div className="field">
@@ -150,8 +158,7 @@ export function SessionManager({
                     <tr>
                       <th>Research question</th>
                       <th>Status</th>
-                      <th className="num">Cycles</th>
-                      <th className="num">Experiments</th>
+                      <th className="num">Training runs</th>
                       <th>Created</th>
                       <th aria-label="actions" />
                     </tr>
@@ -163,29 +170,10 @@ export function SessionManager({
                         className="row-clickable investigation-list-row"
                         onClick={() => onOpenSession(s.session_id)}
                       >
+                        <td>{s.research_question}</td>
                         <td>
-                          {s.research_question}
-                          {s.parent_session_id && (
-                            <>
-                              {" "}
-                              <Badge variant="muted">follow-up</Badge>
-                            </>
-                          )}
+                          <Badge variant={STATUS_BADGE[s.status]}>{s.status}</Badge>
                         </td>
-                        <td>
-                          {s.termination_reason === "cycle_limit" ? (
-                            <Badge variant="danger">stopped at limit</Badge>
-                          ) : s.status === "concluded" ? (
-                            <Badge variant="ok">concluded</Badge>
-                          ) : s.run_phase === "running" ? (
-                            <Badge variant="warn">running</Badge>
-                          ) : s.run_phase === "failed" ? (
-                            <Badge variant="danger">failed</Badge>
-                          ) : (
-                            <Badge variant="muted">active</Badge>
-                          )}
-                        </td>
-                        <td className="num">{s.cycle_count}</td>
                         <td className="num">{s.experiment_count}</td>
                         <td>{formatTimestamp(s.created_at)}</td>
                         <td>

@@ -9,8 +9,8 @@ splitting.py     - deterministic 70/15/15 split, fixed per dataset
 dataset.py       - Dataset facade: load_split(normalize) -> DatasetSplit
 
 None of these touch the database - ingest_csv returns a DatasetProfile that
-the caller is responsible for persisting via StateManager (see
-backend/tools/state_manager.py's create_dataset/get_dataset).
+the caller persists via Repository.create_dataset
+(backend/database/repository.py).
 """
 
 from backend.tools.dataset.dataset import Dataset, DatasetSplit

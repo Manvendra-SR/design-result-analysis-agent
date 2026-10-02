@@ -1,139 +1,63 @@
 import { useQuery } from "@tanstack/react-query";
 
-import {
-  qk,
-  useCycles,
-  useExperiments,
-  useRecommendation,
-  useRunInvestigation,
-  useSession,
-} from "../hooks/queries";
-import { deriveRunState, isFinished } from "../lib/runState";
+import { qk, useRunInvestigation, useSession } from "../hooks/queries";
 import { api } from "../services/api";
-import { AdaptiveLoopVisualizer } from "./AdaptiveLoopVisualizer";
-import { CycleHistory } from "./CycleHistory";
+import { DecisionLog } from "./DecisionLog";
 import { ExperimentTable } from "./ExperimentTable";
-import { ExperimentVisualizer } from "./ExperimentVisualizer";
-import { FollowUpPanel } from "./FollowUpPanel";
-import { RecommendationPanel } from "./RecommendationPanel";
+import { PlanPanel } from "./PlanPanel";
+import { ReportPanel } from "./ReportPanel";
 import { ResearchQuestionDisplay } from "./ResearchQuestionDisplay";
+import { ResultsPanel } from "./ResultsPanel";
 import { RunControl } from "./RunControl";
-import { StatisticsPanel } from "./StatisticsPanel";
 import { Card, ErrorBox, Spinner } from "./ui";
 
 /**
- * SessionView (task 7.11): the per-session dashboard. It owns the polling
- * (`useSession`) and derives the true run state (idle / running / failed /
- * concluded) from the backend's `run_phase` plus the local run mutation -
- * see `lib/runState.ts`. That derived state, not `session.status`, drives the
- * "working" glow and the running banner.
+ * One investigation's dashboard. Everything comes from a single polled
+ * endpoint (GET /api/sessions/{id}), read top to bottom in the order the
+ * agent works: question -> design -> results -> decisions -> answer -> raw runs.
  */
-export function SessionView({
-  sessionId,
-  onBack,
-  onOpenSession,
-}: {
-  sessionId: string;
-  onBack: () => void;
-  onOpenSession?: (sessionId: string) => void;
-}) {
+export function SessionView({ sessionId, onBack }: { sessionId: string; onBack: () => void }) {
   const run = useRunInvestigation(sessionId);
-  const session = useSession(sessionId, run.isPending);
-
-  const notConcluded =
-    !!session.data &&
-    session.data.status !== "concluded" &&
-    session.data.current_node !== "concluded";
-
-  const runState = session.data ? deriveRunState(session.data, run) : "idle";
-
-  // Auxiliary data keeps refreshing until the session is concluded.
-  const live = notConcluded;
-  const experiments = useExperiments(sessionId, live);
-  const cycles = useCycles(sessionId, live);
-  const recommendation = useRecommendation(sessionId, live);
-
+  const session = useSession(sessionId);
   const dataset = useQuery({
     queryKey: qk.dataset(session.data?.dataset_id ?? "none"),
     queryFn: () => api.getDataset(session.data!.dataset_id),
     enabled: !!session.data?.dataset_id,
   });
 
+  const back = (
+    <button type="button" className="link-btn" onClick={onBack}>
+      ← Back to all investigations
+    </button>
+  );
+
   if (session.isLoading) {
     return (
       <Card>
-        <Spinner /> Loading session…
+        <Spinner /> Loading investigation…
       </Card>
     );
   }
   if (session.error || !session.data) {
     return (
       <div className="stack">
-        <button type="button" className="link-btn" onClick={onBack}>
-          ← Back to all investigations
-        </button>
-        <ErrorBox>Could not load this session.</ErrorBox>
+        {back}
+        <ErrorBox>Could not load this investigation.</ErrorBox>
       </div>
     );
   }
 
   const s = session.data;
-  // Each cycle stores the CUMULATIVE analysis as of that cycle, so flattening
-  // every cycle's list would show the same comparison once per cycle. The
-  // latest cycle already contains everything computed so far.
-  const latestCycle = (cycles.data ?? []).at(-1);
-  const comparisons = latestCycle?.statistical_comparisons ?? [];
-  const skipped = latestCycle?.skipped_comparisons ?? [];
-  const conditionSummaries = latestCycle?.condition_summaries ?? [];
-  const finished = isFinished(runState);
-
   return (
     <div className="stack">
-      <button type="button" className="link-btn" onClick={onBack}>
-        ← Back to all investigations
-      </button>
-
+      {back}
       <ResearchQuestionDisplay session={s} dataset={dataset.data} />
-
-      <AdaptiveLoopVisualizer
-        currentNode={s.current_node}
-        cycleCount={s.cycle_count}
-        experimentCount={s.experiment_count}
-        runState={runState}
-      />
-
-      <RunControl
-        session={s}
-        runState={runState}
-        error={run.error}
-        onRun={() => run.mutate()}
-      />
-
-      <RecommendationPanel
-        recommendation={recommendation.data ?? null}
-        terminationReason={s.termination_reason}
-        maxCycles={s.max_cycles}
-      />
-
-      {finished && onOpenSession && (
-        <FollowUpPanel
-          session={s}
-          stoppedAtLimit={runState === "stopped_at_limit"}
-          onOpenSession={onOpenSession}
-        />
-      )}
-
-      <StatisticsPanel
-        comparisons={comparisons}
-        skipped={skipped}
-        conditionSummaries={conditionSummaries}
-      />
-
-      <ExperimentVisualizer experiments={experiments.data ?? []} />
-
-      <ExperimentTable experiments={experiments.data ?? []} />
-
-      <CycleHistory cycles={cycles.data ?? []} />
+      <RunControl session={s} starting={run.isPending} error={run.error} onRun={() => run.mutate()} />
+      {s.report && <ReportPanel report={s.report} />}
+      <PlanPanel plan={s.plan} nSeeds={s.n_seeds} />
+      <ResultsPanel analysis={s.analysis} />
+      <DecisionLog decisions={s.decisions} />
+      <ExperimentTable experiments={s.experiments} />
     </div>
   );
 }

@@ -44,5 +44,6 @@ frontend/.env.local
 data/
 
 # Others
-docs/
+# docs/
 tests/
+Architecture_deep_dive.md

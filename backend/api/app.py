@@ -1,121 +1,59 @@
 """
 backend/api/app.py
 ====================
-The FastAPI application factory.
-
-``create_app()`` builds a fresh app (used by tests, which then override
-``get_context``); ``app = create_app()`` at module scope is what
-``uvicorn backend.api.app:app`` serves. The real ``StateMachineContext`` is
-still built lazily on the first request that needs it, so importing this
-module never touches the database or Groq.
-
-Middleware / handlers
----------------------
-- CORS (origins from ``config.CORS_ORIGINS``; ``*`` in dev)
-- a request-logging middleware (method, path, status, duration)
-- the exception -> ``ErrorResponse`` handlers from ``errors.py``
-- a lifespan hook that checks database connectivity on startup
-
-Requirements
-------------
-12.11  CORS headers so the frontend can call the API
-Non-Functional Reliability 1/2  startup connectivity check
+The FastAPI application. ``uvicorn backend.api.app:app`` serves it; tests call
+``create_app()`` and override the dependencies in ``dependencies.py``.
+Importing this module touches neither the database nor the LLM.
 """
 
 from __future__ import annotations
 
 import logging
-import time
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 import backend.config as config
+from backend.api.dependencies import get_repository
 from backend.api.errors import install_error_handlers
-from backend.api.routes import datasets, experiments, sessions
-from backend.database.connection import test_connection
+from backend.api.routes import datasets, sessions
+from backend.database.connection import database_reachable
 
 logger = logging.getLogger(__name__)
 
 
-def _cors_origins() -> list[str]:
-    raw = config.CORS_ORIGINS.strip()
-    if raw == "*" or not raw:
-        return ["*"]
-    return [origin.strip() for origin in raw.split(",") if origin.strip()]
-
-
 @asynccontextmanager
-async def _lifespan(_: FastAPI):
-    reachable = test_connection()
-    provider = config.LLM_PROVIDER
-    if provider == "gemini":
-        model, key_set, key_var, key_hint = (
-            config.GEMINI_MODEL, bool(config.GEMINI_API_KEY),
-            "GEMINI_API_KEY", "get a key at https://aistudio.google.com/apikey",
-        )
-    else:
-        model, key_set, key_var, key_hint = (
-            config.GROQ_MODEL, bool(config.GROQ_API_KEY),
-            "GROQ_API_KEY", "free key at https://console.groq.com",
-        )
-    logger.info(
-        "API startup: database reachable=%s, llm provider=%s model=%s",
-        reachable, provider, model,
-    )
-    if not reachable:
-        logger.warning(
-            "Database is not reachable at startup; requests that touch it will fail "
-            "until it comes back (DATABASE_URL=%s).",
-            "<set>" if config.DATABASE_URL else "<unset>",
-        )
-    if not key_set:
-        logger.warning(
-            "%s is not set - run-cycle requests will fail until you add it to .env (%s).",
-            key_var, key_hint,
-        )
+async def _lifespan(app: FastAPI):
+    if not config.GROQ_API_KEY:
+        logger.warning("GROQ_API_KEY is not set - investigations will fail until it is added to .env.")
+    try:
+        repo = app.dependency_overrides.get(get_repository, get_repository)()
+        interrupted = repo.fail_interrupted_runs()
+        if interrupted:
+            logger.warning("Marked %d investigation(s) interrupted by the last shutdown as failed.", interrupted)
+    except Exception as exc:  # noqa: BLE001 - the API can still start without a database
+        logger.warning("Database not reachable at startup: %s", exc)
     yield
-    logger.info("API shutdown")
 
 
 def create_app() -> FastAPI:
-    """Build the FastAPI app (no side effects beyond object construction)."""
     app = FastAPI(
         title="Adaptive ML Experiment Agent",
-        version="0.1.0",
-        description="Closed-loop adaptive experimentation over a user-uploaded dataset.",
+        description="Plans, runs and statistically evaluates experiments that answer a question about a dataset.",
         lifespan=_lifespan,
     )
-
+    origins = [o.strip() for o in config.CORS_ORIGINS.split(",") if o.strip()] or ["*"]
     app.add_middleware(
-        CORSMiddleware,
-        allow_origins=_cors_origins(),
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        CORSMiddleware, allow_origins=origins, allow_credentials=True, allow_methods=["*"], allow_headers=["*"]
     )
-
-    @app.middleware("http")
-    async def _log_requests(request: Request, call_next):
-        start = time.perf_counter()
-        response = await call_next(request)
-        duration_ms = (time.perf_counter() - start) * 1000
-        logger.info(
-            "%s %s -> %d (%.1f ms)",
-            request.method, request.url.path, response.status_code, duration_ms,
-        )
-        return response
-
     install_error_handlers(app)
-
-    app.include_router(sessions.router)
-    app.include_router(experiments.router)
     app.include_router(datasets.router)
+    app.include_router(sessions.router)
 
     @app.get("/health", tags=["health"])
     def health() -> dict:
-        return {"status": "ok", "database": test_connection()}
+        return {"status": "ok", "database": database_reachable()}
 
     return app
 

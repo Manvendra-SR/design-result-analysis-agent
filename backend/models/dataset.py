@@ -97,7 +97,7 @@ class DatasetProfile(BaseModel):
 
     ORM round-trip
     --------------
-    Stored as a single JSONB column (``datasets.profile``) by StateManager,
+    Stored as a single JSONB column (``datasets.profile``) by the Repository,
     the same pattern used for ``ExperimentConfiguration``.
     """
 

@@ -28,8 +28,8 @@ export function App() {
       </header>
       <p className="app-tagline">
         Upload a dataset, ask a question about it, and let an LLM-driven agent
-        plan, run, and statistically analyse experiments — cycling until it can
-        answer.
+        design, run, and statistically evaluate a controlled experiment that
+        answers it.
       </p>
 
       {sessionId === null ? (
@@ -53,11 +53,7 @@ export function App() {
           </div>
         </>
       ) : (
-        <SessionView
-          sessionId={sessionId}
-          onBack={() => setSessionId(null)}
-          onOpenSession={setSessionId}
-        />
+        <SessionView sessionId={sessionId} onBack={() => setSessionId(null)} />
       )}
     </div>
   );

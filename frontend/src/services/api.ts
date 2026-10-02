@@ -1,20 +1,15 @@
 /*
- * Thin axios wrapper over the Phase 6 REST API. One function per endpoint;
+ * Thin axios wrapper over the REST API. One function per endpoint;
  * no caching or retry logic here (react-query owns that).
  */
 import axios from "axios";
 
 import type {
   ApiError,
-  CreateSessionResponse,
   DatasetIngestRequest,
   DatasetProfile,
   DeleteResult,
-  ExperimentResult,
-  ExperimentStatus,
-  Recommendation,
-  RunCycleResponse,
-  SessionCycle,
+  Session,
   SessionDetail,
   SessionSummary,
 } from "../types/api";
@@ -27,8 +22,7 @@ export function errorStatus(err: unknown): number {
 export const http = axios.create({
   baseURL: "/api",
   headers: { "Content-Type": "application/json" },
-  // No timeout: POST /run-cycle runs the whole investigation in one request.
-  timeout: 0,
+  timeout: 60000,
 });
 
 /** Pull the human-readable message out of an {error, message, details} body. */
@@ -66,28 +60,11 @@ export const api = {
     http.get<SessionSummary[]>("/sessions").then((r) => r.data),
   getSession: (id: string) =>
     http.get<SessionDetail>(`/sessions/${id}`).then((r) => r.data),
-  createSession: (body: {
-    research_question: string;
-    dataset_id: string;
-    /** Provenance only — a follow-up starts with no evidence of its own. */
-    parent_session_id?: string;
-  }) => http.post<CreateSessionResponse>("/sessions", body).then((r) => r.data),
+  createSession: (body: { research_question: string; dataset_id: string }) =>
+    http.post<Session>("/sessions", body).then((r) => r.data),
   deleteSession: (id: string) =>
     http.delete<DeleteResult>(`/sessions/${id}`).then((r) => r.data),
-  runCycle: (id: string) =>
-    http.post<RunCycleResponse>(`/sessions/${id}/run-cycle`).then((r) => r.data),
-
-  // experiments / analysis
-  getExperiments: (id: string, status?: ExperimentStatus) =>
-    http
-      .get<ExperimentResult[]>(`/sessions/${id}/experiments`, {
-        params: status ? { status } : undefined,
-      })
-      .then((r) => r.data),
-  getExperiment: (id: string) =>
-    http.get<ExperimentResult>(`/experiments/${id}`).then((r) => r.data),
-  getRecommendation: (id: string) =>
-    http.get<Recommendation>(`/sessions/${id}/recommendation`).then((r) => r.data),
-  getCycles: (id: string) =>
-    http.get<SessionCycle[]>(`/sessions/${id}/cycles`).then((r) => r.data),
+  /** Starts the investigation server-side and returns at once (202). */
+  runSession: (id: string) =>
+    http.post<Session>(`/sessions/${id}/run`).then((r) => r.data),
 };

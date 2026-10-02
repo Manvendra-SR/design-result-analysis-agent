@@ -27,7 +27,7 @@ Requirements
 1.5  Compute a DatasetProfile (columns, task_type, class info, ...)
 1.6  Compute a fixed split_seed per dataset
 1.7  Store the dataset file on disk (metadata persistence is the caller's
-     job, via StateManager.create_dataset)
+     job, via Repository.create_dataset)
 """
 
 from __future__ import annotations
@@ -226,7 +226,7 @@ def delete_dataset_files(dataset_id: str) -> None:
 
     Best-effort: a missing directory is fine, and any filesystem error is
     logged rather than raised - the database row is the source of truth and
-    has already been deleted by the caller (``StateManager.delete_dataset``).
+    has already been deleted by the caller (``Repository.delete_dataset``).
     """
     target = _UPLOADS_DIR / dataset_id
     if not target.exists():

@@ -1,139 +1,104 @@
 import type {
-  AnomalyReport,
-  ComparisonSkip,
-  ConditionSummary,
+  Analysis,
+  Comparison,
+  Decision,
   ExperimentConfiguration,
   ExperimentResult,
-  Recommendation,
-  SessionCycle,
+  Plan,
+  Report,
   SessionDetail,
-  StatisticalComparison,
 } from "../types/api";
 
-export function makeConfig(
-  over: Partial<ExperimentConfiguration> = {},
-): ExperimentConfiguration {
+export function makeConfig(over: Partial<ExperimentConfiguration> = {}): ExperimentConfiguration {
   return {
     dataset_id: "ds-1",
     model_type: "mlp",
-    hyperparameters: { dropout: 0.2, learning_rate: 0.001 },
+    hyperparameters: { dropout: 0.2, epochs: 10 },
     preprocessing: { normalize: false },
-    random_seed: 42,
+    random_seed: 0,
     ...over,
   };
 }
 
-export function makeExperiment(
-  over: Partial<ExperimentResult> = {},
-): ExperimentResult {
+export function makeExperiment(over: Partial<ExperimentResult> = {}): ExperimentResult {
   return {
     experiment_id: Math.random().toString(36).slice(2),
     session_id: "sess-1",
+    round: 1,
     config: makeConfig(over.config),
-    task_type: "classification",
-    metrics: {
-      train_loss: 0.12,
-      val_loss: 0.18,
-      accuracy: 0.93,
-    },
-    status: "success",
+    status: "ok",
     error: null,
-    cycle: 1,
-    timestamp: "2026-01-01T10:00:00Z",
+    metrics: { accuracy: 0.81, train_loss: 0.42, training_time_seconds: 3.2 },
+    created_at: "2026-01-01T10:00:00+00:00",
     ...over,
   };
 }
 
-export function makeComparison(
-  over: Partial<StatisticalComparison> = {},
-): StatisticalComparison {
+export function makePlan(over: Partial<Plan> = {}): Plan {
   return {
-    comparison_id: Math.random().toString(36).slice(2),
-    condition_a_name: "dropout_0.0",
-    condition_b_name: "dropout_0.2",
+    factor: "dropout",
+    levels: [0, 0.2],
+    reference: 0,
+    base: { model_type: "mlp", hyperparameters: { epochs: 10 }, normalize: false },
+    rationale: "Vary dropout and hold everything else fixed.",
+    ...over,
+  };
+}
+
+export function makeComparison(over: Partial<Comparison> = {}): Comparison {
+  return {
+    level: 0.2,
+    label: "dropout=0.2",
+    diff: 0.021,
+    ci_low: 0.008,
+    ci_high: 0.034,
+    verdict: "better",
+    ...over,
+  };
+}
+
+export function makeAnalysis(over: Partial<Analysis> = {}): Analysis {
+  return {
+    split: "val",
     metric: "accuracy",
-    test_type: "two_sample_t",
-    t_statistic: 2.4,
-    p_value: 0.03,
-    effect_size: 0.62,
-    confidence_interval: [0.01, 0.05],
-    sample_sizes: [6, 6],
-    warning: null,
+    higher_is_better: true,
+    n_rows: 1575,
+    majority_rate: 0.6,
+    conditions: [
+      { level: 0, label: "dropout=0", is_reference: true, n_ok: 3, n_failed: 0, mean: 0.79, seed_std: 0.002 },
+      { level: 0.2, label: "dropout=0.2", is_reference: false, n_ok: 2, n_failed: 1, mean: 0.811, seed_std: 0.003 },
+    ],
+    comparisons: [makeComparison()],
     ...over,
   };
 }
 
-export function makeSkip(over: Partial<ComparisonSkip> = {}): ComparisonSkip {
+export function makeDecision(over: Partial<Decision> = {}): Decision {
   return {
-    condition_a_name: "mlp",
-    condition_b_name: "linear_baseline",
-    metric: "accuracy",
-    reason_code: "insufficient_variance",
-    reason: "Both conditions are deterministic, so no t-test is defined.",
-    ...over,
-  };
-}
-
-export function makeConditionSummary(
-  over: Partial<ConditionSummary> = {},
-): ConditionSummary {
-  return {
-    condition_name: "mlp | dropout=0.1",
-    metric: "accuracy",
-    n_successful: 6,
-    n_anomalous: 0,
-    n_failed: 0,
-    mean: 0.78,
-    std: 0.004,
-    min: 0.77,
-    max: 0.79,
-    deterministic: false,
-    ...over,
-  };
-}
-
-export function makeAnomaly(over: Partial<AnomalyReport> = {}): AnomalyReport {
-  return {
-    anomaly_id: Math.random().toString(36).slice(2),
-    experiment_id: "exp-1",
-    rule: "outlier_detection",
-    explanation: "val_loss is far from the group mean",
-    severity: "warning",
-    detected_cycle: 1,
-    resolved_cycle: null,
-    detected_at: "2026-01-01T10:00:00Z",
-    ...over,
-  };
-}
-
-export function makeRecommendation(
-  over: Partial<Recommendation> = {},
-): Recommendation {
-  return {
+    round: 1,
     action: "conclude",
-    recommended_experiments: [],
-    explanation: "The evidence answers the question.",
-    evidence_summary: "12 experiments across 2 conditions.",
-    timestamp: "2026-01-01T10:30:00Z",
+    new_levels: [],
+    rationale: "dropout=0.2 is clearly better; nothing untried would change that.",
+    decided_by: "agent",
     ...over,
   };
 }
 
-export function makeCycle(over: Partial<SessionCycle> = {}): SessionCycle {
+export function makeReport(over: Partial<Report> = {}): Report {
   return {
-    cycle_number: 1,
-    plan_explanation: null,
-    experiments: [],
-    anomalies_detected: [],
-    anomalies_resolved: [],
-    cumulative_experiment_count: 0,
-    open_anomaly_count: 0,
-    statistical_comparisons: [],
-    skipped_comparisons: [],
-    condition_summaries: [],
-    recommendation: null,
-    continued: false,
-    termination_reason: null,
+    challenger: "dropout=0.2",
+    reference: "dropout=0",
+    metric: "accuracy",
+    higher_is_better: true,
+    challenger_score: 0.812,
+    reference_score: 0.793,
+    comparison: makeComparison({ diff: 0.019, ci_low: 0.005, ci_high: 0.033 }),
+    majority_rate: 0.6,
+    n_test_rows: 1575,
+    rounds_run: 1,
+    stopped_by: "agent",
+    headline: "On the held-out test set (1575 rows), dropout=0.2 performs better than dropout=0.",
+    interpretation: "Dropout helps a little on this dataset.",
     ...over,
   };
 }
@@ -142,19 +107,17 @@ export function makeSession(over: Partial<SessionDetail> = {}): SessionDetail {
   return {
     session_id: "sess-1",
     dataset_id: "ds-1",
-    parent_session_id: null,
     research_question: "Does dropout help?",
-    status: "active",
-    current_node: "planning",
-    run_phase: "idle",
-    run_error: null,
-    termination_reason: null,
-    cycle_count: 0,
-    experiment_count: 0,
-    max_cycles: 6,
-    plan_explanation: null,
-    created_at: "2026-01-01T09:00:00Z",
-    updated_at: "2026-01-01T09:00:00Z",
+    status: "pending",
+    error: null,
+    plan: null,
+    decisions: [],
+    report: null,
+    created_at: "2026-01-01T10:00:00+00:00",
+    experiments: [],
+    analysis: null,
+    max_rounds: 3,
+    n_seeds: 3,
     ...over,
   };
 }

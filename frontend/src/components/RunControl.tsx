@@ -1,108 +1,63 @@
-import { isFinished, isUnstarted, type RunState } from "../lib/runState";
 import { apiErrorMessage } from "../services/api";
 import type { SessionDetail } from "../types/api";
+import { currentRound } from "./ResearchQuestionDisplay";
 import { Badge, Card, ErrorBox, Spinner } from "./ui";
 
 /**
- * The single workflow trigger. The Phase 5/6 backend runs the entire
- * investigation in one POST /run-cycle (many cycles, no human gate), so this
- * is "Run Investigation" - or "Resume" if a previous run stopped partway or
- * failed - rather than the per-cycle "Approve and Run" of the original spec.
- *
- * The button, banner and error shown depend on `runState` (derived from the
- * backend's `run_phase` + the local mutation), NOT on `session.status`:
- *
- *   idle             -> "Run"/"Resume" button, no banner
- *   running          -> disabled button + "running" banner
- *   failed           -> the persisted error + a "Resume" button
- *   concluded        -> a completion message, no button
- *   stopped_at_limit -> finished but UNRESOLVED: the safety cap stopped a loop
- *                       that wanted more experiments. Shown as a warning, not
- *                       a success, and points at the follow-up path.
+ * Starts the investigation. The backend runs it in the background; this card
+ * reflects `session.status` (pending / running / done / failed), which is
+ * persisted, so it is right after a page refresh too.
  */
 export function RunControl({
   session,
-  runState,
+  starting,
   error,
   onRun,
 }: {
   session: SessionDetail;
-  runState: RunState;
+  starting: boolean;
   error: unknown;
   onRun: () => void;
 }) {
-  const fresh = isUnstarted(session);
-  const runLabel = fresh ? "Run Investigation" : "Resume Investigation";
-  // The persisted reason (survives refresh) or the just-failed mutation error.
-  const failureMessage =
-    session.run_error ?? (error != null ? apiErrorMessage(error) : null);
+  const { status } = session;
+  const running = status === "running" || starting;
 
   return (
     <Card
       title="Run"
       badge={<Badge variant="gradient">Control</Badge>}
-      hint="One run executes every adaptive cycle server-side until the Recommender concludes or the safety cap is reached."
+      hint={`The agent plans the experiment, then runs up to ${session.max_rounds} rounds (${session.n_seeds} seeds per MLP condition) before reporting.`}
     >
-      {isFinished(runState) ? (
-        runState === "stopped_at_limit" ? (
-          <div className="error-box" role="status">
-            Stopped at the {session.max_cycles}-cycle safety limit — the agent
-            still wanted more experiments, so this investigation is finished but
-            unresolved. Ask a follow-up question below to keep going.
-          </div>
-        ) : (
-          <div className="concluded-banner" role="status">
-            <span aria-hidden="true">✓</span>
-            <span>Investigation complete — no further runs needed.</span>
-          </div>
-        )
+      {status === "done" ? (
+        <div className="concluded-banner" role="status">
+          <span aria-hidden="true">✓</span>
+          <span>Investigation complete — see the result below.</span>
+        </div>
       ) : (
         <>
-          {runState === "failed" && failureMessage && (
+          {status === "failed" && session.error && (
             <div style={{ marginBottom: 12 }}>
-              <ErrorBox>
-                Last run failed at the <strong>{session.current_node}</strong>{" "}
-                stage: {failureMessage}
-                <br />
-                The session stays resumable — Resume re-runs from that stage. A
-                local model occasionally returns an unusable recommendation;
-                retrying often clears it.
-              </ErrorBox>
+              <ErrorBox>Last run failed: {session.error}</ErrorBox>
             </div>
           )}
-
-          <button
-            type="button"
-            className="btn btn--primary"
-            onClick={onRun}
-            disabled={runState === "running"}
-          >
-            {runState === "running" && <Spinner onPrimary />}
-            {runState === "running"
-              ? "Running investigation…"
-              : runState === "failed"
-                ? "Resume Investigation"
-                : runLabel}
+          {error != null && (
+            <div style={{ marginBottom: 12 }}>
+              <ErrorBox>{apiErrorMessage(error)}</ErrorBox>
+            </div>
+          )}
+          <button type="button" className="btn btn--primary" onClick={onRun} disabled={running}>
+            {running && <Spinner onPrimary />}
+            {running ? "Running…" : status === "failed" ? "Start over" : "Run investigation"}
           </button>
-
-          {runState === "running" && (
+          {running && (
             <div className="running-banner" role="status">
               <span className="running-dot" aria-hidden="true" />
               <span>
-                The backend is working through the loop. Progress below updates
-                as each stage completes; this request finishes when the
-                investigation concludes.
+                {session.plan
+                  ? `Round ${Math.max(1, currentRound(session))} of up to ${session.max_rounds} · ${session.experiments.length} runs finished`
+                  : "Planning the experiment…"}
               </span>
             </div>
-          )}
-
-          {runState === "idle" && !fresh && (
-            <p className="card__hint" style={{ marginTop: 12 }}>
-              This session is partway through (stage:{" "}
-              <span className="mono">{session.current_node}</span>, cycle{" "}
-              <span className="mono">{session.cycle_count}</span>). Resume
-              continues it to a conclusion.
-            </p>
           )}
         </>
       )}

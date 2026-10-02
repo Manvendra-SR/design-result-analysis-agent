@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Statistics Explained</title>
+  <script>
+    MathJax = {
+      tex: { inlineMath: [['$', '$'], ['\\(', '\\)']] },
+      options: { skipHtmlTags: ['script','noscript','style','textarea','pre'] }
+    };
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js" async></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      background: #0f1117;
+      color: #e2e8f0;
+      padding: 40px 20px;
+      line-height: 1.7;
+    }
+    .container { max-width: 860px; margin: 0 auto; }
+
+    h1 {
+      font-size: 2rem;
+      font-weight: 700;
+      background: linear-gradient(90deg, #7c3aed, #3b82f6);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      margin-bottom: 6px;
+    }
+    .subtitle {
+      color: #64748b;
+      font-size: 0.95rem;
+      margin-bottom: 40px;
+      font-family: monospace;
+    }
+
+    .section {
+      background: #1e2130;
+      border: 1px solid #2d3148;
+      border-radius: 12px;
+      padding: 28px 32px;
+      margin-bottom: 28px;
+    }
+    .section-header {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      margin-bottom: 20px;
+    }
+    .badge {
+      background: linear-gradient(135deg, #7c3aed, #3b82f6);
+      color: white;
+      font-size: 0.8rem;
+      font-weight: 700;
+      padding: 4px 12px;
+      border-radius: 20px;
+      white-space: nowrap;
+    }
+    h2 { font-size: 1.25rem; font-weight: 600; color: #f1f5f9; }
+    h3 { font-size: 1rem; font-weight: 600; color: #94a3b8; margin: 18px 0 8px; text-transform: uppercase; letter-spacing: 0.05em; font-size: 0.8rem; }
+
+    .question {
+      background: #0f172a;
+      border-left: 3px solid #7c3aed;
+      padding: 10px 16px;
+      border-radius: 0 8px 8px 0;
+      color: #a5b4fc;
+      font-style: italic;
+      margin-bottom: 16px;
+      font-size: 0.95rem;
+    }
+
+    code {
+      background: #0d1117;
+      color: #7dd3fc;
+      font-family: 'Cascadia Code', 'Fira Code', monospace;
+      padding: 3px 8px;
+      border-radius: 5px;
+      font-size: 0.88rem;
+      border: 1px solid #1e3a5f;
+    }
+    pre {
+      background: #0d1117;
+      border: 1px solid #1e293b;
+      border-radius: 8px;
+      padding: 16px 20px;
+      overflow-x: auto;
+      margin: 14px 0;
+    }
+    pre code {
+      background: none;
+      border: none;
+      padding: 0;
+      font-size: 0.9rem;
+      color: #7dd3fc;
+    }
+
+    .math-block {
+      background: #0d1117;
+      border: 1px solid #1e3a5f;
+      border-radius: 8px;
+      padding: 18px 24px;
+      margin: 14px 0;
+      text-align: center;
+      font-size: 1.05rem;
+      overflow-x: auto;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 14px 0;
+      font-size: 0.9rem;
+    }
+    th {
+      background: #1a1f35;
+      color: #94a3b8;
+      font-weight: 600;
+      padding: 10px 14px;
+      text-align: left;
+      border-bottom: 1px solid #2d3148;
+    }
+    td {
+      padding: 9px 14px;
+      border-bottom: 1px solid #1e2130;
+      color: #cbd5e1;
+    }
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: #1e2130; }
+
+    .green { color: #4ade80; font-weight: 600; }
+    .yellow { color: #fbbf24; font-weight: 600; }
+    .red { color: #f87171; font-weight: 600; }
+    .purple { color: #a78bfa; }
+
+    .note {
+      background: #0c1a2e;
+      border: 1px solid #1e3a5f;
+      border-radius: 8px;
+      padding: 12px 16px;
+      margin-top: 14px;
+      font-size: 0.88rem;
+      color: #7dd3fc;
+    }
+    .note::before { content: "💡 "; }
+
+    .example-box {
+      background: #111827;
+      border: 1px dashed #374151;
+      border-radius: 8px;
+      padding: 16px 20px;
+      margin-top: 16px;
+    }
+    .example-box .label {
+      font-size: 0.75rem;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      color: #4b5563;
+      text-transform: uppercase;
+      margin-bottom: 10px;
+    }
+
+    .divider {
+      height: 1px;
+      background: linear-gradient(90deg, transparent, #2d3148, transparent);
+      margin: 32px 0;
+    }
+
+    .summary-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px;
+      margin-top: 14px;
+    }
+    .summary-card {
+      background: #111827;
+      border: 1px solid #1f2937;
+      border-radius: 8px;
+      padding: 14px 16px;
+    }
+    .summary-card .stat-name { font-size: 0.75rem; color: #6b7280; font-weight: 700; text-transform: uppercase; }
+    .summary-card .stat-val { font-size: 1.2rem; font-weight: 700; color: #a78bfa; margin: 4px 0 2px; }
+    .summary-card .stat-desc { font-size: 0.8rem; color: #6b7280; }
+
+    @media (max-width: 600px) {
+      .summary-grid { grid-template-columns: 1fr; }
+      .section { padding: 18px 16px; }
+    }
+  </style>
+</head>
+<body>
+<div class="container">
+
+  <h1>Statistics, explained</h1>
+  <p class="subtitle">backend/tools/stats.py &rarr; analyze() · compare() · bootstrap_diff()</p>
+
+  <!-- ===== 1. THE QUESTION ===== -->
+  <div class="section">
+    <div class="section-header">
+      <span class="badge">1</span>
+      <h2>What are we comparing?</h2>
+    </div>
+    <div class="question">Does level X of the factor perform better than the reference level, on this dataset?</div>
+    <p>
+      The planner picks <strong>one factor</strong> (dropout, hidden_size, normalize, model_type, …),
+      a few <strong>levels</strong> of it, and one <strong>reference</strong> level to compare the others against.
+      Every other setting is held fixed. Each level is a <em>condition</em>; each condition is trained with a few
+      random seeds (one run for the seed-independent <code>linear_baseline</code>).
+    </p>
+    <div class="example-box">
+      <div class="label">Example</div>
+      <p>Factor <code>dropout</code>, levels <code>0, 0.2, 0.5</code>, reference <code>0</code>, base MLP with hidden_size 64 and 20 epochs.
+      Statistics compare <code>dropout=0.2</code> vs <code>dropout=0</code> and <code>dropout=0.5</code> vs <code>dropout=0</code>.</p>
+    </div>
+  </div>
+
+  <!-- ===== 2. WHAT IS A SAMPLE ===== -->
+  <div class="section">
+    <div class="section-header">
+      <span class="badge">2</span>
+      <h2>The sample is an evaluation row, not a seed</h2>
+    </div>
+    <p>
+      The data split is fixed per dataset, so a random seed changes only weight initialisation, dropout masks and batch order.
+      Treating seeds as the sample (a t-test over 3 runs per condition) measures only that <em>optimisation noise</em> —
+      and ignores the larger source of uncertainty: the evaluation set is a finite sample of rows.
+    </p>
+    <table>
+      <tr><th>Source of variation</th><th>Size on diabetes_risk.csv (1,575 validation rows)</th></tr>
+      <tr><td>Spread of MLP accuracy across seeds</td><td class="green">≈ 0.04 pts</td></tr>
+      <tr><td>Standard error of one accuracy from the finite row sample, $\sqrt{p(1-p)/n}$</td><td class="yellow">≈ 1.1 pts</td></tr>
+    </table>
+    <p>
+      A seed-based test would call a 0.3-point difference "highly significant" when it is well inside what a different
+      draw of rows could produce. So the statistics resample <strong>rows</strong>. Seeds are still used — averaged, to smooth
+      out initialisation noise — and their spread is reported separately as <em>stability</em>.
+    </p>
+  </div>
+
+  <!-- ===== 3. PER-ROW SCORES ===== -->
+  <div class="section">
+    <div class="section-header">
+      <span class="badge">3</span>
+      <h2>Per-row scores, averaged over seeds</h2>
+    </div>
+    <p>Every training run scores <em>every</em> validation and test row:</p>
+    <div class="math-block">
+      $$s_{r,i} = \begin{cases} \mathbb{1}[\hat y_{r,i} = y_i] & \text{classification (1 = correct)} \\ (\hat y_{r,i} - y_i)^2 & \text{regression (squared error)} \end{cases}$$
+    </div>
+    <p>For a condition $c$ with successful runs $R_c$, the row score is the average over its seeds:</p>
+    <div class="math-block">
+      $$\bar s_{c,i} = \frac{1}{|R_c|} \sum_{r \in R_c} s_{r,i}$$
+    </div>
+    <p>
+      The mean of $\bar s_{c,i}$ over rows is exactly the condition's accuracy (or MSE). A single-run condition, like
+      <code>linear_baseline</code>, simply has $|R_c| = 1$ — no special case.
+    </p>
+  </div>
+
+  <!-- ===== 4. PAIRED BOOTSTRAP ===== -->
+  <div class="section">
+    <div class="section-header">
+      <span class="badge">4</span>
+      <h2>Paired bootstrap confidence interval</h2>
+    </div>
+    <p>Both conditions are scored on the <em>same</em> rows, so they are compared row by row:</p>
+    <div class="math-block">
+      $$d_i = \bar s_{\text{level},i} - \bar s_{\text{ref},i}, \qquad \hat\Delta = \frac{1}{n}\sum_{i=1}^{n} d_i$$
+    </div>
+    <p>
+      $\hat\Delta$ is the accuracy (or MSE) difference. Pairing removes the variation from rows that are easy or hard for
+      every model, which is why the interval is much tighter than comparing two independent accuracies would give.
+    </p>
+    <h3>The bootstrap</h3>
+    <p>
+      Draw $n$ rows with replacement, take the mean of their $d_i$, repeat $B = 2000$ times. The 2.5th and 97.5th
+      percentiles of those means are the 95% confidence interval:
+    </p>
+    <div class="math-block">
+      $$\text{CI}_{95\%} = \left[\, q_{0.025}\big(\hat\Delta^{*}_1, \dots, \hat\Delta^{*}_B\big),\; q_{0.975}\big(\hat\Delta^{*}_1, \dots, \hat\Delta^{*}_B\big) \,\right]$$
+    </div>
+<pre><code>d = level_rows - reference_rows
+rng = np.random.default_rng(0)                    # reproducible
+means = d[rng.integers(0, n, size=(B, n))].mean(axis=1)
+low, high = np.percentile(means, [2.5, 97.5])</code></pre>
+    <div class="note">The bootstrap needs no normality assumption and works the same for 0/1 correctness and for squared errors.</div>
+  </div>
+
+  <!-- ===== 5. VERDICT ===== -->
+  <div class="section">
+    <div class="section-header">
+      <span class="badge">5</span>
+      <h2>From interval to verdict</h2>
+    </div>
+    <table>
+      <tr><th>Confidence interval</th><th>Accuracy (higher is better)</th><th>MSE (lower is better)</th></tr>
+      <tr><td>entirely above 0</td><td class="green">better</td><td class="red">worse</td></tr>
+      <tr><td>entirely below 0</td><td class="red">worse</td><td class="green">better</td></tr>
+      <tr><td>contains 0</td><td class="yellow">inconclusive</td><td class="yellow">inconclusive</td></tr>
+    </table>
+    <p>
+      No p-values are reported: the interval already says how large the difference plausibly is <em>and</em> whether its
+      sign is settled, which is what a practitioner actually needs.
+    </p>
+  </div>
+
+  <!-- ===== 6. TRAIN / VAL / TEST ===== -->
+  <div class="section">
+    <div class="section-header">
+      <span class="badge">6</span>
+      <h2>Train, validation, test — and the sealed test set</h2>
+    </div>
+    <table>
+      <tr><th>Split</th><th>Share</th><th>Used for</th></tr>
+      <tr><td>train</td><td>70%</td><td>fitting the models</td></tr>
+      <tr><td>validation</td><td>15%</td><td>every decision inside the loop: results table, which levels to explore, which level is best</td></tr>
+      <tr><td>test</td><td>15%</td><td><strong>once</strong>, at the end: best validation level vs reference</td></tr>
+    </table>
+    <p>
+      The loop looks at validation results after every round and adapts to them. Testing repeatedly on the data you adapt
+      to — "run more until p &lt; 0.05" — inflates false positives. Here that cannot happen: the confirmatory comparison is on
+      rows the loop never saw, and it is <em>one comparison chosen before looking</em>, so no multiple-comparison correction
+      is needed either. Validation results in the UI are labelled exploratory for this reason.
+    </p>
+  </div>
+
+  <!-- ===== 7. WHAT IS EXCLUDED ===== -->
+  <div class="section">
+    <div class="section-header">
+      <span class="badge">7</span>
+      <h2>What gets excluded (almost nothing)</h2>
+    </div>
+    <p>
+      A run is excluded only if it is <strong>invalid</strong>: it crashed, or produced NaN/Inf. That check lives in
+      <code>run_experiment</code>. A run that is merely <em>unusual</em> — an unlucky seed — stays in: it is part of the
+      condition's real behaviour, and removing it would shrink the spread and overstate certainty.
+    </p>
+    <p>
+      The sanity floor for classification is the <strong>majority-class rate</strong> (always predicting the most common
+      class), shown next to every result. On a 60/25/15 dataset that floor is 60%, not the $1/k = 33\%$ "chance" level.
+    </p>
+  </div>
+
+  <!-- ===== 8. LIMITATION ===== -->
+  <div class="section">
+    <div class="section-header">
+      <span class="badge">8</span>
+      <h2>What this does not capture</h2>
+    </div>
+    <p>
+      Resampling evaluation rows conditions on the <em>one</em> training split: it says how a comparison would vary on
+      different evaluation data, not how it would vary if the models were retrained on different data. Capturing that
+      needs k-fold cross-validation (with a corrected resampled t-test), which multiplies training cost and is
+      deliberately out of scope.
+    </p>
+  </div>
+
+  <!-- ===== SUMMARY ===== -->
+  <div class="section">
+    <div class="section-header">
+      <span class="badge">∑</span>
+      <h2>All together</h2>
+    </div>
+    <div class="summary-grid">
+      <div class="summary-card">
+        <div class="stat-name">Difference</div>
+        <div class="stat-val">How much?</div>
+        <div class="stat-desc">$\hat\Delta$: accuracy (pts) or MSE difference vs the reference.</div>
+      </div>
+      <div class="summary-card">
+        <div class="stat-name">95% CI</div>
+        <div class="stat-val">How sure?</div>
+        <div class="stat-desc">Paired bootstrap over rows. Not crossing 0 settles the direction.</div>
+      </div>
+      <div class="summary-card">
+        <div class="stat-name">Seed spread</div>
+        <div class="stat-val">How stable?</div>
+        <div class="stat-desc">Std across a level's training runs — stability, not uncertainty.</div>
+      </div>
+      <div class="summary-card">
+        <div class="stat-name">Majority floor</div>
+        <div class="stat-val">Learned anything?</div>
+        <div class="stat-desc">Score of always predicting the most common class.</div>
+      </div>
+    </div>
+
+    <div class="example-box" style="margin-top:20px;">
+      <div class="label">A real report (diabetes_risk.csv, dropout)</div>
+      <p>
+        Headline, built by code: <code>dropout=0.1 vs dropout=0 · accuracy 74.7% vs 72.5% · +2.2 pts · 95% CI +1.1 to +3.4 pts · better</code>
+      </p>
+      <p style="margin-top:10px; color:#a5b4fc; font-style:italic;">
+        The LLM's interpretation then explains it in a few sentences — citing these numbers, never computing them —
+        and adds one caveat: the result holds for this dataset and training split.
+      </p>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>
