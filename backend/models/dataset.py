@@ -28,8 +28,8 @@ A non-numeric target column, or a numeric target with a small number of
 distinct integer-like values, is inferred as ``classification``; everything
 else is inferred as ``regression``. A caller may override this via
 ``ingest_csv(..., task_type_override=...)`` — ``task_type_source`` records
-whether the stored ``task_type`` was inferred or supplied, so a later
-UI/planner layer can confirm or correct the heuristic without re-reading
+whether the stored ``task_type`` was inferred or supplied, so the UI can
+confirm or correct the heuristic without re-reading
 the raw file.
 
 Requirements
@@ -91,8 +91,8 @@ class DatasetProfile(BaseModel):
     """Result of ingesting and profiling a user-uploaded CSV dataset.
 
     Scoped intentionally: this carries what is operationally required to
-    run experiments and what is directly useful to a future LLM planner
-    describing the dataset in a prompt — not a general exploratory-analysis
+    run experiments and what the LLM planner needs
+    to describe the dataset in a prompt (counts only) — not a general exploratory-analysis
     profiling framework (no per-column distributions/correlations).
 
     ORM round-trip

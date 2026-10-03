@@ -9,6 +9,7 @@ import { ResultsPanel } from "../ResultsPanel";
 import {
   makeAnalysis,
   makeComparison,
+  makeCondition,
   makeDecision,
   makeExperiment,
   makeReport,
@@ -36,6 +37,33 @@ describe("ResultsPanel", () => {
     expect(screen.getByText(/lower is better/)).toBeInTheDocument();
     expect(screen.getByText("-0.500")).toBeInTheDocument();
   });
+
+  it("in selection mode marks the leader and contenders and shows the change vs the parent", () => {
+    render(
+      <ResultsPanel
+        analysis={makeAnalysis({
+          mode: "selection",
+          leader: "c3",
+          contenders: ["c2", "c3"],
+          conditions: [
+            makeCondition({ id: "c1", label: "linear_baseline", family: "linear_baseline", change: null }),
+            makeCondition({ id: "c2", label: "mlp", is_reference: false, change: null, contender: true }),
+            makeCondition({ id: "c3", label: "mlp, hidden_size=128", parent: "c2", change: "hidden_size=128",
+                            is_reference: false, contender: true, mean: 0.82 }),
+          ],
+          comparisons: [
+            makeComparison({ a: "c2", b: "c3", anchor: "leader", diff: -0.01, ci_low: -0.03, ci_high: 0.01,
+                             verdict: "inconclusive" }),
+            makeComparison({ a: "c3", b: "c2", anchor: "parent", diff: 0.01 }),
+          ],
+        })}
+      />,
+    );
+    expect(screen.getByText("leader")).toBeInTheDocument();
+    expect(screen.getByText("contender")).toBeInTheDocument();
+    expect(screen.getByText("Δ vs leader")).toBeInTheDocument();
+    expect(screen.getByText("+1.0 pts (hidden_size=128)")).toBeInTheDocument();
+  });
 });
 
 describe("ReportPanel", () => {
@@ -47,6 +75,25 @@ describe("ReportPanel", () => {
     expect(screen.getByText(/3 rounds · stopped by the round budget/)).toBeInTheDocument();
   });
 
+  it("shows the secondary comparison at the Bonferroni level in selection mode", () => {
+    render(
+      <ReportPanel
+        report={makeReport({
+          mode: "selection",
+          runner_up: "random_forest",
+          confidence: 0.975,
+          secondary: makeComparison({ anchor: "runner_up", diff: 0.004, ci_low: -0.01, ci_high: 0.018,
+                                      verdict: "inconclusive", confidence: 0.975 }),
+          stopped_by: "settled",
+        })}
+      />,
+    );
+    expect(screen.getByText("vs random_forest · 97.5% CI")).toBeInTheDocument();
+    expect(screen.getByText("vs reference · 97.5% CI")).toBeInTheDocument();
+    expect(screen.getByText("inconclusive")).toBeInTheDocument();
+    expect(screen.getByText(/every contender was one family/)).toBeInTheDocument();
+  });
+
   it("works without an interpretation", () => {
     render(<ReportPanel report={makeReport({ interpretation: null })} />);
     expect(screen.queryByText("LLM Interpretation")).not.toBeInTheDocument();
@@ -54,16 +101,17 @@ describe("ReportPanel", () => {
 });
 
 describe("DecisionLog", () => {
-  it("lists explore and budget decisions", () => {
+  it("lists refine and budget decisions", () => {
     render(
       <DecisionLog
         decisions={[
-          makeDecision({ round: 1, action: "explore", new_levels: [0.1, 0.3], rationale: "Try between." }),
+          makeDecision({ round: 1, action: "refine", parent: "c1", knob: "dropout", values: [0.1, 0.3],
+                         new_candidates: ["c3", "c4"], rationale: "Try between." }),
           makeDecision({ round: 2, decided_by: "budget", rationale: "Round budget reached (2 rounds)." }),
         ]}
       />,
     );
-    expect(screen.getByText("explore 0.1, 0.3")).toBeInTheDocument();
+    expect(screen.getByText("refine c1 · dropout = 0.1, 0.3")).toBeInTheDocument();
     expect(screen.getByText("round budget")).toBeInTheDocument();
   });
 });

@@ -13,12 +13,9 @@ different meanings of "model" that the codebase deliberately keeps apart.
 TabularMLP
     Single-hidden-layer feed-forward network, generalized to any tabular
     dataset via ``input_dim``/``output_dim`` derived from a
-    ``DatasetProfile``. Replaces the old MNIST-specific ``MNISTClassifier``
-    — see DESIGN_REVIEW_CHANGES.md's "Architecture Revision" entry.
-
-Requirements
-------------
-3.3  mlp model: configurable hidden_size and dropout, dataset-agnostic dims
+    ``DatasetProfile``. Deliberately simple (one hidden layer, ReLU): it
+    represents the neural family in the comparison, it is not the thing
+    being optimised.
 """
 
 from __future__ import annotations

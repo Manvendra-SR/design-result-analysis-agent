@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>Adaptive ML Experiment Agent · Simplified Architecture</title>
+<title>Adaptive ML Experiment Agent · Architecture</title>
 <!--
   ============================================================
   ARCHITECTURE DIAGRAM TEMPLATE — drop-in for any system
@@ -686,7 +686,7 @@
   <!-- 1. Top-of-page text. Change SYSTEM_NAME, the accented words, and the subtitle. -->
   <span class="eyebrow"><span class="dot"></span> design-result-analysis-agent · backend</span>
   <h1>Adaptive ML Experiment Agent <span class="accent">how it works</span></h1>
-  <p class="sub">A research question plus a CSV go in. An LLM designs a one-factor experiment, code trains and evaluates it, the LLM decides whether another round is worth running, and the answer comes from a single comparison on a held-out test set. LLMs handle language; code handles every number. Pick a scenario and step through it.</p>
+  <p class="sub">A research question plus a CSV go in. An LLM turns the question into a design — compare model families, or vary one factor — code derives, trains and statistically compares the candidates on validation, the LLM picks which one-knob refinement of a model still in contention to try next within hard limits, and the answer comes from comparisons fixed in advance and run once on a held-out test set. LLMs handle language and judgement; code handles every rule and every number. Pick a scenario and step through it.</p>
 </header>
 
 <div class="controls">
@@ -727,9 +727,9 @@
      Aim for 3-6 flows; more than 6 clutters the bar. -->
 <nav class="flowtabs" aria-label="Scenarios">
   <button class="flowtab" data-flow="setup" aria-pressed="true"><span class="num">1</span> Setup</button>
-  <button class="flowtab" data-flow="plan_run" aria-pressed="false"><span class="num">2</span> Plan &amp; run</button>
-  <button class="flowtab" data-flow="analyze_decide" aria-pressed="false"><span class="num">3</span> Analyze &amp; decide</button>
-  <button class="flowtab" data-flow="finalize" aria-pressed="false"><span class="num">4</span> Finalize</button>
+  <button class="flowtab" data-flow="plan_run" aria-pressed="false"><span class="num">2</span> Plan &amp; round 1</button>
+  <button class="flowtab" data-flow="analyze_decide" aria-pressed="false"><span class="num">3</span> Analyze &amp; refine</button>
+  <button class="flowtab" data-flow="finalize" aria-pressed="false"><span class="num">4</span> Select, test &amp; report</button>
   <button class="flowtab" data-flow="readback" aria-pressed="false"><span class="num">5</span> UI reads state</button>
   <button class="flowtab" data-flow="failure" aria-pressed="false"><span class="num">6</span> Failure</button>
 </nav>
@@ -824,8 +824,8 @@
       <div class="node" data-role="compute" data-id="planner" style="left: 56%; top: 4%;">
         <div class="icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 2h6a1 1 0 0 1 1 1v2H8V3a1 1 0 0 1 1-1z"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><line x1="8" y1="11" x2="16" y2="11"/><line x1="8" y1="15" x2="13" y2="15"/></svg></div>
         <div class="label">Planner agent</div>
-        <div class="tech">LLM</div>
-        <div class="port">factor · levels · reference</div>
+        <div class="tech">LLM · 1 call</div>
+        <div class="port">mode · families / factor</div>
         <span class="step-badge">·</span>
       </div>
 
@@ -833,7 +833,7 @@
         <div class="icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96.44A2.5 2.5 0 0 1 4 18a2.5 2.5 0 0 1-1.55-4.45A2.5 2.5 0 0 1 4 9a2.5 2.5 0 0 1 1.55-4.45A2.5 2.5 0 0 1 9.5 2z"/><path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96.44A2.5 2.5 0 0 0 20 18a2.5 2.5 0 0 0 1.55-4.45A2.5 2.5 0 0 0 20 9a2.5 2.5 0 0 0-1.55-4.45A2.5 2.5 0 0 0 14.5 2z"/></svg></div>
         <div class="label">Recommender agent</div>
         <div class="tech">LLM</div>
-        <div class="port">decide · interpret</div>
+        <div class="port">refine · conclude · interpret</div>
         <span class="step-badge">·</span>
       </div>
 
@@ -841,7 +841,7 @@
         <div class="icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/><line x1="20" y1="9" x2="23" y2="9"/><line x1="20" y1="14" x2="23" y2="14"/><line x1="1" y1="9" x2="4" y2="9"/><line x1="1" y1="14" x2="4" y2="14"/></svg></div>
         <div class="label">Experiment runner</div>
         <div class="tech" data-tech-gpu="PyTorch · CUDA / sklearn" data-tech-cpu="PyTorch · CPU / sklearn">PyTorch · CUDA / sklearn</div>
-        <div class="port">train + validity check</div>
+        <div class="port">4 model families</div>
         <span class="step-badge">·</span>
       </div>
 
@@ -849,7 +849,7 @@
         <div class="icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg></div>
         <div class="label">Stats</div>
         <div class="tech">numpy</div>
-        <div class="port">paired bootstrap CI</div>
+        <div class="port">bootstrap · contenders</div>
         <span class="step-badge">·</span>
       </div>
 
@@ -923,12 +923,12 @@ const flows = {
         from:"client", to:"api", color:"--c-user",
         title:"Upload a CSV",
         route:"POST /api/datasets",
-        desc:"The CSV is sent as text with the chosen target column, so no multipart dependency is needed.",
+        desc:"The CSV is sent as text with the chosen target column (it is never guessed), so no multipart dependency is needed.",
         payload:
 `POST /api/datasets
 {
     "filename": "diabetes_risk.csv",
-    "csv_content": "age,bmi,...,diabetes_risk\\n47,26.5,...",
+    "csv_content": "patient_id,age,gender,...,diabetes_risk\\n1,47,Female,...",
     "target_column": "diabetes_risk"
 }`,
         chips:["validated","profiled"]
@@ -937,14 +937,14 @@ const flows = {
         from:"api", to:"files", color:"--c-orch",
         title:"Profile and store the file",
         route:"ingest_csv()",
-        desc:"Ingestion validates the CSV, infers classification vs regression, one-hot encodes categoricals and fixes a <em>split_seed</em>, so every run uses the same train/val/test rows.",
+        desc:"Rows with a missing value are dropped (no imputation). The task type is inferred (non-numeric or few integer values → classification), categoricals are one-hot encoded, and a fixed <em>split_seed</em> gives every run the same 70/15/15 rows. The cleaned CSV is stored on disk.",
         payload:
 `DatasetProfile(
-    task_type          = "classification",
-    n_rows             = 10500,
-    n_features         = 49,        # after one-hot encoding
+    task_type          = "classification",   # inferred
+    n_rows             = 10500,              # 15000 before dropping missing
+    n_features         = 49,                 # 18 columns after one-hot
     class_distribution = {"Low": 6302, "Moderate": 2630, "High": 1568},
-    split_seed         = 42         # fixed 70/15/15 split
+    split_seed         = 42                  # 7350 / 1575 / 1575 rows
 )`,
         chips:["70/15/15","one split"]
       },
@@ -961,11 +961,11 @@ const flows = {
         from:"client", to:"api", color:"--c-user",
         title:"Ask a research question",
         route:"POST /api/sessions",
-        desc:"An investigation pairs one question with one dataset.",
+        desc:"An investigation pairs one question with one dataset. The question can ask which model is best (selection) or whether one factor helps (effect).",
         payload:
 `POST /api/sessions
 {
-    "research_question": "Does dropout improve the MLP's accuracy?",
+    "research_question": "Which model performs best for classification on this dataset?",
     "dataset_id": "22db..."
 }`,
         chips:["201"]
@@ -990,7 +990,7 @@ const flows = {
   /* ───── 2. Start, plan, run round 1 ───── */
   plan_run: {
     name: "Start · plan · run round 1",
-    note: "POST /run returns 202 at once; the investigation runs as a background task.",
+    note: "POST /run returns 202 at once; the investigation runs as a background task. One LLM call designs it; code derives every configuration.",
     steps: [
       {
         from:"client", to:"api", color:"--c-user",
@@ -1003,33 +1003,23 @@ const flows = {
         chips:["202","background"]
       },
       {
-        from:"api", to:"db", color:"--c-vector",
-        title:"Mark it running",
-        route:"UPDATE sessions",
-        desc:"Set before the response, so the UI sees <em>running</em> on its very next poll.",
-        payload:
-`repo.set_status(session_id, "running")
-background.add_task(investigate, session_id)`,
-        chips:["one status field"]
-      },
-      {
         from:"api", to:"graph", color:"--c-orch",
         title:"Run the LangGraph loop",
         route:"run_investigation()",
-        desc:"The loop's state lives in memory for this one run: plan, round, results, decisions. It never raises: any failure is recorded on the session.",
+        desc:"Status is set to <em>running</em> before the response. The loop's state (plan, round, results, decisions) lives in memory for this one run; any failure is recorded on the session instead of raised.",
         payload:
 `graph.invoke({
     "session_id": "a41d...",
-    "question":   "Does dropout improve ...",
+    "question":   "Which model performs best ...",
     "profile":    DatasetProfile(...)
 })`,
-        chips:["in-memory state"]
+        chips:["5 nodes","in-memory state"]
       },
       {
         from:"graph", to:"planner", color:"--c-compute",
         title:"Design the experiment",
         route:"Planner.plan()",
-        desc:"The one step that genuinely needs language understanding: which factor is the question about, which levels to try, and what to compare against.",
+        desc:"The step that genuinely needs language understanding: is this a <em>selection</em> question (which model?) or an <em>effect</em> question (does X help?), and what should be compared.",
         payload:
 `planner.plan(question, profile)`,
         chips:["1 call per run"]
@@ -1037,50 +1027,50 @@ background.add_task(investigate, session_id)`,
       {
         from:"planner", to:"llm", color:"--c-compute",
         title:"Structured LLM call",
-        route:"chat_json(schema)",
-        desc:"Generation is constrained to a strict JSON schema. The model fills a small form - it never writes raw configurations or seeds.",
+        route:"chat_json(PLAN_SCHEMA)",
+        desc:"A fixed system prompt (two modes, four families, their knob ranges) plus the question and dataset <em>counts</em> only — no rows, no column names. Strict JSON schema, output capped, usage logged.",
         payload:
-`POST https://api.groq.com/openai/v1/chat/completions
-{
-    "model": "openai/gpt-oss-120b",
-    "response_format": {"type": "json_schema",
-                        "json_schema": {"strict": true, "schema": PLAN_SCHEMA}},
-    "temperature": 0.2
-}`,
-        chips:["~2s","strict schema"]
+`Research question: Which model performs best for classification on this dataset?
+
+Dataset:
+- task: classification, target column 'diabetes_risk'
+- 10500 rows, 18 feature columns (10 numeric, 8 categorical)
+- 3 classes, distribution {'Low': 6302, 'Moderate': 2630, 'High': 1568}
+# 945 input tokens · reasoning_effort=medium · max 2048 output tokens`,
+        chips:["strict schema","stateless"]
       },
       {
         from:"llm", to:"planner", color:"--c-compute",
         title:"The design comes back",
         route:"reply JSON",
-        desc:"Levels arrive as strings and are parsed per factor. A rule violation (dropout 1.5, a repeated level) is sent back to the model once to fix.",
+        desc:"Selection: 2–4 distinct families. Effect: one factor, 2–5 distinct levels, the reference among them, every value in range. A broken rule is sent back to the model once; an <em>error</em> becomes a PlanningError.",
         payload:
-`{
-    "factor": "dropout",
-    "levels": ["0", "0.2", "0.5"],
-    "reference": "0",
-    "base": {"model_type": "mlp", "normalize": false,
-             "hyperparameters": {"hidden_size": 64, "epochs": 20, ...}},
-    "rationale": "Vary only dropout ..."
-}`,
+`{"mode": "selection",
+ "families": ["linear_baseline", "decision_tree", "random_forest", "mlp"],
+ "rationale": "Compare the four families at their defaults."}
+
+# the other mode:
+{"mode": "effect", "factor": "max_depth", "levels": ["2","4","8","16"],
+ "reference": "8", "base": {"model_type": "decision_tree", ...}}`,
         chips:["1 retry max"]
       },
       {
         from:"planner", to:"graph", color:"--c-orch",
-        title:"Code expands the plan into runs",
-        route:"configs_for(plan)",
-        desc:"Each level = the base config with only the factor changed, so <em>vary one factor at a time</em> holds by construction. Seeds 0..N-1 per MLP level; linear_baseline is seed-independent and runs once.",
+        title:"Code derives the candidates",
+        route:"Plan.selection() / Plan.effect()",
+        desc:"Selection: one root per family at its registry defaults and default preprocessing; the simplest family is the reference <em>c1</em>. Effect: the reference level is the root and every other level is it with only the factor changed. Seeds: 3 for random forest / MLP, 1 for the seed-independent linear model and tree.",
         payload:
-`dropout=0    seeds 0,1,2
-dropout=0.2  seeds 0,1,2
-dropout=0.5  seeds 0,1,2      # 9 runs`,
-        chips:["×3 seeds","one factor"]
+`c1  linear_baseline  normalized          1 run    reference
+c2  decision_tree    max_depth 8          1 run
+c3  random_forest    200 trees            seeds 0,1,2
+c4  mlp              hidden 64, 20 epochs seeds 0,1,2   # 8 runs`,
+        chips:["FAMILIES registry","lineage"]
       },
       {
         from:"graph", to:"db", color:"--c-vector",
         title:"Save the plan",
         route:"UPDATE sessions.plan",
-        desc:"The UI shows the design as soon as it exists.",
+        desc:"The plan holds every candidate with its lineage; the UI shows it as soon as it exists.",
         payload:
 `repo.save_plan(session_id, plan)`,
         chips:["visible in UI"]
@@ -1089,39 +1079,38 @@ dropout=0.5  seeds 0,1,2      # 9 runs`,
         from:"graph", to:"runner", color:"--c-embed",
         title:"Train each run",
         route:"run_experiment()",
-        desc:"One complete training run per configuration. The MLP trains on the GPU when one is present; the training set stays on the device and batches are taken by index.",
+        desc:"One complete training run per configuration. Only the MLP uses the device; the sklearn families (logistic, tree, forest) run on the CPU either way.",
         payloadGpu:
 `run_experiment(config, profile, session_id, round=1)
-# DEVICE = cuda
-# x_train, y_train on GPU; batches by index (no per-batch copy)
-# one device sync per epoch`,
+# MLP: DEVICE = cuda, training set on the GPU, batches by index
+# measured: linear 0.2 s · tree 0.2 s · forest 1.6-3.2 s · MLP 30-36 s`,
         payloadCpu:
 `run_experiment(config, profile, session_id, round=1)
-# DEVICE = cpu  (no CUDA available)
-# identical code path and batch order`,
-        chipsGpu:["CUDA","~3s large MLP"],
-        chipsCpu:["CPU","~9s large MLP"]
+# MLP: DEVICE = cpu  (no CUDA available)
+# identical code path, seeds and batch order`,
+        chipsGpu:["CUDA","MLP launch-bound"],
+        chipsCpu:["CPU","same results"]
       },
       {
         from:"runner", to:"files", color:"--c-embed",
         title:"Load the fixed split",
         route:"Dataset.load_split()",
-        desc:"Same rows in train/val/test for every run. Normalisation, when it is the factor, is fit on the training split only.",
+        desc:"Same rows in train/val/test for every run. When <em>normalize</em> is on, the StandardScaler is fit on the training split only.",
         payload:
-`DatasetSplit(x_train, y_train,   # 70%
-             x_val,   y_val,     # 15%  drives the loop
-             x_test,  y_test)    # 15%  sealed until the end`,
+`DatasetSplit(x_train, y_train,   # 7350 rows
+             x_val,   y_val,     # 1575 rows  drives the loop
+             x_test,  y_test)    # 1575 rows  sealed until the end`,
         chips:["no leakage"]
       },
       {
         from:"runner", to:"graph", color:"--c-embed",
         title:"Result: ok or failed",
         route:"ExperimentResult",
-        desc:"A run is <em>failed</em> only if it crashed or produced NaN/Inf. Every other run is evidence - unusual results are never dropped. Each run scores every validation and test row.",
+        desc:"A run is <em>failed</em> only if it crashed or produced NaN/Inf; every other run is evidence. Each run scores every validation and test row and records the same metric on the training rows.",
         payload:
 `ExperimentResult(
     status      = "ok",
-    metrics     = {"accuracy": 0.747, "train_loss": 0.52, ...},
+    metrics     = {"accuracy": 0.782, "train_accuracy": 1.0, "train_loss": ..., ...},
     val_scores  = [1, 0, 1, 1, ...],   # 1575 rows: correct or not
     test_scores = [0, 1, 1, 0, ...]    # 1575 rows: sealed
 )`,
@@ -1141,70 +1130,82 @@ dropout=0.5  seeds 0,1,2      # 9 runs`,
 
   /* ───── 3. Analyze and decide ───── */
   analyze_decide: {
-    name: "Analyze · decide · explore",
-    note: "Validation results drive every decision. The test split is not touched here.",
+    name: "Analyze · decide · refine",
+    note: "Validation results drive every decision. Code rules run before the LLM; the test split is not touched here.",
     steps: [
       {
         from:"graph", to:"stats", color:"--c-embed",
         title:"Analyze on the validation split",
         route:"stats.analyze(split='val')",
-        desc:"Per level: mean metric and seed spread. Then each level vs the reference: per-row scores averaged over seeds, differenced row by row, rows resampled 2000 times.",
+        desc:"Per candidate: per-row scores averaged over seeds, mean, seed spread, train metric and train-validation gap. Any two candidates are differenced row by row and the rows resampled 2000 times. Pairs: vs the reference; in selection mode also vs the current <em>leader</em> and a refined child vs its <em>parent</em>.",
         payload:
-`d_i  = score_level(row i) - score_reference(row i)
+`d_i  = score_a(row i) - score_b(row i)
 diff = mean(d)
-CI   = 2.5 / 97.5 percentiles of mean(d) over 2000 row resamples`,
+CI   = 2.5 / 97.5 percentiles of mean(d) over 2000 row resamples
+leader     = best mean
+contenders = candidates whose CI vs the leader is not entirely on the worse side of 0`,
         chips:["2000 resamples","paired by row"]
       },
       {
         from:"stats", to:"graph", color:"--c-embed",
-        title:"An Analysis object",
+        title:"The evidence after round 1",
         route:"Analysis",
-        desc:"Verdict = <em>better</em> / <em>worse</em> when the whole CI is on one side of zero, otherwise <em>inconclusive</em>. Seed spread is reported as stability, not uncertainty.",
+        desc:"Logistic regression leads; the forest is within noise of it, the tree and the MLP are clearly behind. The forest's 100% training accuracy shows it overfits. Recomputed from the stored runs, never stored.",
         payload:
-`conditions:  dropout=0    3 runs  74.0%  ±0.04%   (reference)
-             dropout=0.2  3 runs  74.6%  ±0.05%
-comparisons: dropout=0.2  +0.6 pts  CI -0.4 to +1.6  inconclusive`,
-        chips:["recomputed, not stored"]
+`c1 linear_baseline  79.05%  gap  0.9   leader (reference)
+c2 decision_tree    75.75%  gap  7.6   vs leader -3.3 pts [-5.1, -1.6]  worse
+c3 random_forest    78.20%  gap 21.8   vs leader -0.85    [-1.9, +0.25] contender
+c4 mlp              77.40%  gap  7.6   vs leader -1.65    [-2.9, -0.4]  worse
+contenders: c1, c3   (two families)`,
+        chips:["exploratory","not stored"]
       },
       {
         from:"graph", to:"recommender", color:"--c-compute",
-        title:"Is another round worth it?",
-        route:"Recommender.decide()",
-        desc:"Skipped entirely on the last round - the budget concludes deterministically. Otherwise the agent sees the compact results table and the rounds left.",
+        title:"Code rules first",
+        route:"decide_node()",
+        desc:"Last round (MAX_ROUNDS = 3) → conclude, <em>budget</em>. Selection mode with every contender in one family → conclude, <em>settled</em>. Only otherwise is the Recommender asked.",
         payload:
-`recommender.decide(question, plan, analysis,
-                   round=1, max_rounds=3)`,
-        chips:["MAX_ROUNDS=3"]
+`if round >= MAX_ROUNDS:         conclude (budget)    # no LLM call
+elif contenders are one family:  conclude (settled)   # no LLM call
+else:                            recommender.decide(question, plan, analysis, round, 3)`,
+        chips:["MAX_ROUNDS=3","settled rule"]
       },
       {
         from:"recommender", to:"llm", color:"--c-compute",
-        title:"Explore or conclude",
+        title:"Refine one knob, or conclude",
         route:"chat_json(DECISION_SCHEMA)",
-        desc:"The open-ended judgement: does an untried region of the same factor look worth a round? Seeds and replicates are not the agent's business.",
+        desc:"One compact JSON row per candidate (mean, train, gap, [diff, low, high] vs reference / leader / parent, contender flag) and the refinable knob ranges of the contenders' families. No runs, no rows, no history.",
         payload:
-`{"action": "explore" | "conclude",
- "new_levels": ["0.05", "0.1"],
- "rationale": "..."}`,
-        chips:["~2s"]
+`{"mode":"selection","val_rows":1575,"reference":"c1","leader":"c1",
+ "round":1,"rounds_left":2,"candidates":[
+  {"id":"c3","family":"random_forest","val":0.782,"seed_std":0.0046,
+   "train":1.0,"gap":0.218,"vs_leader":[-0.0085,-0.019,0.0025],
+   "contender":true}, ...],
+ "refinable":{"random_forest":{"max_depth":[2,40],
+   "min_samples_leaf":[1,100],"max_features":[0.1,1.0]}}}
+# 732 input tokens`,
+        chips:["compact","bounded"]
       },
       {
         from:"llm", to:"recommender", color:"--c-compute",
         title:"Proposal validated by code",
-        route:"build()",
-        desc:"New levels must be the same factor, in range, and not tried before - otherwise the error goes back to the model once.",
+        route:"Plan.refine()",
+        desc:"Accepted only if the parent is a contender (effect mode: the reference), the knob is a refinable knob of its family (effect mode: the factor), there are 1–3 values in range, and no configuration repeats. Otherwise the error goes back to the model once.",
         payload:
-`Decision(round=1, action="explore", new_levels=[0.05, 0.1],
-         rationale="0.2 beat 0 but 0.5 hurt; check below 0.2",
-         decided_by="agent")`,
-        chips:["same factor only"]
+`{"action":"refine","parent":"c3","knob":"min_samples_leaf","values":["5","20"],
+ "rationale":"The forest is a contender but its train-validation gap is large ..."}
+
+# rejected instead:  refine c4 ...  -> "c4 is not a contender;
+#                    refine one of ['c1', 'c3'] or conclude"`,
+        chips:["one knob","contenders only"]
       },
       {
         from:"recommender", to:"graph", color:"--c-compute",
         title:"Branch",
         route:"conditional edge",
-        desc:"explore → the new levels are appended to the plan and the loop goes back to <em>run_experiments</em> for round 2. conclude → <em>finalize</em>.",
+        desc:"refine → the children (parent with one knob changed) are added to the plan and the loop goes back to <em>run_experiments</em>. conclude → <em>finalize</em>.",
         payload:
-`decide --explore-->  run_experiments  (round 2: 0.05, 0.1)
+`decide --refine-->   run_experiments  (round 2: c5 = c3 + leaf 5, c6 = c3 + leaf 20)
 decide --conclude--> finalize`,
         chips:["loop"]
       },
@@ -1212,20 +1213,22 @@ decide --conclude--> finalize`,
         from:"graph", to:"db", color:"--c-vector",
         title:"Record the decision",
         route:"UPDATE sessions.decisions / plan",
-        desc:"The decision text is the only thing the LLM produces that cannot be recomputed, so it is the only history kept.",
+        desc:"The decision (who decided, what was added) is the only history kept besides the runs; the plan is saved with the new candidates.",
         payload:
-`repo.append_decision(session_id, decision)
-repo.save_plan(session_id, plan_with_new_levels)`,
+`repo.append_decision(session_id, Decision(round=1, action="refine",
+    parent="c3", knob="min_samples_leaf", values=[5, 20],
+    new_candidates=["c5", "c6"], decided_by="agent"))
+repo.save_plan(session_id, plan_with_children)`,
         chips:["append-only"]
       },
       {
         from:"graph", to:"runner", color:"--c-embed",
-        title:"Round 2 runs",
+        title:"Round 2 runs, then round 3",
         route:"run_experiment()",
-        desc:"Only the new levels are trained; earlier runs stay as evidence and the next analysis covers all of them.",
+        desc:"Only the new candidates are trained; earlier runs stay as evidence. After round 2 the agent refined c5's max_depth; after round 3 the budget concluded without an LLM call.",
         payload:
-`dropout=0.05 seeds 0,1,2
-dropout=0.1  seeds 0,1,2      # round = 2`,
+`round 2: c5, c6 x 3 seeds        round 3: c7 = c5 + depth 12, c8 = c5 + depth 24
+total:   8 candidates, 20 runs   decisions: refine, refine, conclude (budget)`,
         chips:["cumulative evidence"]
       }
     ]
@@ -1233,56 +1236,63 @@ dropout=0.1  seeds 0,1,2      # round = 2`,
 
   /* ───── 4. Finalize ───── */
   finalize: {
-    name: "Finalize · one test-set comparison",
-    note: "The test split is read exactly once, for a comparison chosen before looking at it.",
+    name: "Finalize · select, test once, report",
+    note: "Comparisons are fixed from validation; then the test split is read exactly once.",
     steps: [
       {
         from:"graph", to:"stats", color:"--c-embed",
-        title:"Unseal the test split",
-        route:"stats.compare(split='test')",
-        desc:"The best non-reference level on validation is compared with the reference on the untouched test rows. One pre-chosen comparison: no multiple-comparison correction, and the adaptive exploration cannot bias it.",
+        title:"Select on validation",
+        route:"stats.select_final()",
+        desc:"Winner W = the best non-reference candidate. In selection mode, runner-up R = the best candidate whose family is neither W's nor the reference's. Both are fixed before a single test score is read.",
         payload:
-`challenger = best_challenger(plan, val_analysis)   # dropout=0.1
-compare(plan, challenger, groups, split="test")`,
-        chips:["read once","1 comparison"]
+`W = c7  random_forest, min_samples_leaf=5, max_depth=12   (78.48% val)
+R = c4  mlp                                              (77.40% val)
+# the leader c1 is the reference itself, so W is its strongest alternative`,
+        chips:["validation only"]
       },
       {
         from:"stats", to:"graph", color:"--c-embed",
-        title:"The answer, in numbers",
-        route:"Comparison + headline",
-        desc:"The headline sentence is built by code from these numbers - deterministic, never LLM-written.",
+        title:"Unseal the test split",
+        route:"stats.final_comparisons(split='test')",
+        desc:"The same paired bootstrap on the untouched test rows. With k comparisons each CI is at 1 − 0.05/k: 95% for one, 97.5% for two (Bonferroni), so the claims share one 5% error budget.",
         payload:
-`"On the held-out test set (1575 rows), dropout=0.1 performs better
- than dropout=0: accuracy 74.7% vs 72.5%, difference +2.2 pts
- (95% CI +1.1 pts to +3.4 pts)."`,
-        chips:["deterministic"]
+`k = 2  ->  97.5% intervals, 1575 test rows
+W vs reference (linear)   -1.2 pts  [-2.3, -0.1]   worse
+W vs R (mlp)              +0.2 pts  [-1.1, +1.6]   inconclusive (tied)
+W 79.6% [77.6, 81.6] · reference 80.8% [78.8, 82.8] · val->test drop -1.1 pts`,
+        chips:["read once","Bonferroni"]
       },
       {
         from:"graph", to:"recommender", color:"--c-compute",
-        title:"Explain it",
-        route:"Recommender.interpret()",
-        desc:"The LLM turns the computed result into a few plain sentences, with one honest caveat. If this call fails, the report is saved without it.",
+        title:"Build the report, then explain it",
+        route:"headline() · Recommender.interpret()",
+        desc:"The headline is built by code from the numbers. The LLM then turns the finished report into a few sentences with one honest caveat; it cites numbers, never computes them. If this call fails, the report is saved without it.",
         payload:
-`recommender.interpret(question, plan, report)`,
-        chips:["optional prose"]
+`"linear_baseline was the best candidate on validation, so its strongest
+ alternative was tested. On the held-out test set (1575 rows), random_forest,
+ min_samples_leaf=5, max_depth=12 performs worse than linear_baseline: accuracy
+ 79.6% vs 80.8%, difference -1.2 pts (97.5% CI -2.3 pts to -0.1 pts). Against the
+ strongest rival, ... and mlp are statistically tied: difference +0.2 pts ..."`,
+        chips:["deterministic headline"]
       },
       {
         from:"recommender", to:"llm", color:"--c-compute",
         title:"Interpretation call",
         route:"chat_json(INTERPRETATION_SCHEMA)",
-        desc:"It cites numbers; it never computes them.",
+        desc:"The finished report in, 3–5 sentences out, at low reasoning effort.",
         payload:
-`{"interpretation": "Adding a small amount of dropout (0.1) ..."}`,
-        chips:["~1s"]
+`{"interpretation": "..."}     # 764 input tokens · reasoning_effort=low`,
+        chips:["optional prose"]
       },
       {
         from:"graph", to:"db", color:"--c-vector",
         title:"Save the report, mark done",
         route:"UPDATE sessions",
-        desc:"Report = challenger, reference, both test scores, the CI, majority-class floor, rounds run, and whether the agent or the budget stopped it.",
+        desc:"Report = winner, reference, runner-up, both comparisons and their confidence, absolute test scores, val→test drop, candidates per family, rounds run, and who stopped the loop (agent / budget / settled).",
         payload:
-`repo.save_report(session_id, report)
-repo.set_status(session_id, "done")`,
+`effort: linear 1, tree 1, forest 5, mlp 1   stopped_by: budget   rounds_run: 3
+repo.save_report(session_id, report)
+repo.set_status(session_id, "done")      # 4 LLM calls, 20 runs, 156 s`,
         chips:["status: done"]
       }
     ]
@@ -1306,7 +1316,7 @@ repo.set_status(session_id, "done")`,
         from:"api", to:"db", color:"--c-vector",
         title:"Load the session and its runs",
         route:"get_session + list_experiments",
-        desc:"Plan, decisions and report come from the session row; runs from experiments.",
+        desc:"Plan (all candidates and their lineage), decisions and report come from the session row; runs from experiments.",
         payload:
 `session     = repo.get_session(id)
 experiments = repo.list_experiments(id)`,
@@ -1316,22 +1326,23 @@ experiments = repo.list_experiments(id)`,
         from:"api", to:"stats", color:"--c-orch",
         title:"Recompute the validation analysis",
         route:"stats.analyze(split='val')",
-        desc:"Statistics are never stored, so they can never drift from the runs they describe. Only the validation split - test results exist solely in the report.",
+        desc:"Statistics are never stored, so they can never drift from the runs they describe. Only the validation split — test results exist solely in the report.",
         payload:
 `analysis = stats.analyze(session.plan, experiments, profile, "val")`,
-        chips:["~0.1s"]
+        chips:["recomputed"]
       },
       {
         from:"api", to:"client", color:"--c-orch",
         title:"SessionDetail",
         route:"200",
-        desc:"Per-row scores stay server-side - thousands of numbers per run the UI does not need.",
+        desc:"Per-row scores stay server-side — thousands of numbers per run the UI does not need. The UI shows the leader, the contenders and each child's change vs its parent.",
         payload:
 `{
     "status": "running",
-    "plan": {...}, "decisions": [...], "report": null,
+    "plan": {"mode": "selection", "candidates": [...], ...},
+    "decisions": [...], "report": null,
     "experiments": [ {round, config, status, metrics}, ... ],
-    "analysis": {split: "val", conditions: [...], comparisons: [...]},
+    "analysis": {split: "val", leader, contenders, conditions, comparisons},
     "max_rounds": 3, "n_seeds": 3
 }`,
         chips:["no per-row data"]
@@ -1347,11 +1358,12 @@ experiments = repo.list_experiments(id)`,
       {
         from:"planner", to:"graph", color:"--c-compute",
         title:"Something fails",
-        route:"LLMError / PlanningError",
-        desc:"Groq unreachable after retries (timeouts, 429s using Retry-After, 5xx), a question no factor can answer, or nothing successful to compare.",
+        route:"LLMError / PlanningError / ...",
+        desc:"Groq unreachable after transport retries (timeouts, 429s using Retry-After, 5xx); a question the four families cannot answer; an LLM proposal still invalid after its one retry; or nothing successful to compare.",
         payload:
-`PlanningError("This needs a convolutional network.")`,
-        chips:["4 transport retries"]
+`PlanningError("This needs a convolutional network.")
+LLMError("LLM did not produce a valid reply after 2 attempts: ...")`,
+        chips:["4 transport retries","1 validation retry"]
       },
       {
         from:"graph", to:"db", color:"--c-vector",

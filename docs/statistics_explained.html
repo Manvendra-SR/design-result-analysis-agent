@@ -195,7 +195,7 @@
 <div class="container">
 
   <h1>Statistics, explained</h1>
-  <p class="subtitle">backend/tools/stats.py &rarr; analyze() · compare() · bootstrap_diff()</p>
+  <p class="subtitle">backend/tools/stats.py &rarr; analyze() · compare() · bootstrap_diff() · select_final() · final_comparisons()</p>
 
   <!-- ===== 1. THE QUESTION ===== -->
   <div class="section">
@@ -203,17 +203,23 @@
       <span class="badge">1</span>
       <h2>What are we comparing?</h2>
     </div>
-    <div class="question">Does level X of the factor perform better than the reference level, on this dataset?</div>
+    <div class="question">Is candidate a better than candidate b, on the same rows of this dataset?</div>
     <p>
-      The planner picks <strong>one factor</strong> (dropout, hidden_size, normalize, model_type, …),
-      a few <strong>levels</strong> of it, and one <strong>reference</strong> level to compare the others against.
-      Every other setting is held fixed. Each level is a <em>condition</em>; each condition is trained with a few
-      random seeds (one run for the seed-independent <code>linear_baseline</code>).
+      Every comparison in the system is that one question, asked of different pairs. A <em>candidate</em> is one
+      configuration (model family, hyperparameters, normalize); each is trained with a few random seeds
+      (one run for the seed-independent <code>linear_baseline</code> and <code>decision_tree</code>).
+      The planner sets up one of two kinds of investigation:
     </p>
+    <table>
+      <tr><th>Mode</th><th>Candidates</th><th>Compared on validation</th></tr>
+      <tr><td><strong>effect</strong> — “does X help?”</td><td>one <strong>factor</strong>, a few levels of it, one <strong>reference</strong> level; everything else fixed</td><td>each level vs the reference</td></tr>
+      <tr><td><strong>selection</strong> — “which model is best?”</td><td>2–4 model families at their defaults (simplest = reference), then one-knob refinements</td><td>vs the reference, vs the current <strong>leader</strong>, and a refined candidate vs its <strong>parent</strong></td></tr>
+    </table>
     <div class="example-box">
       <div class="label">Example</div>
-      <p>Factor <code>dropout</code>, levels <code>0, 0.2, 0.5</code>, reference <code>0</code>, base MLP with hidden_size 64 and 20 epochs.
-      Statistics compare <code>dropout=0.2</code> vs <code>dropout=0</code> and <code>dropout=0.5</code> vs <code>dropout=0</code>.</p>
+      <p>Effect: factor <code>max_depth</code> of a decision tree, levels <code>2, 4, 8, 16</code>, reference <code>8</code> —
+      each level vs <code>max_depth=8</code>. Selection: logistic regression (reference), decision tree, random forest, MLP —
+      each vs the leader, to decide which are still in contention.</p>
     </div>
   </div>
 
@@ -230,8 +236,8 @@
     </p>
     <table>
       <tr><th>Source of variation</th><th>Size on diabetes_risk.csv (1,575 validation rows)</th></tr>
-      <tr><td>Spread of MLP accuracy across seeds</td><td class="green">≈ 0.04 pts</td></tr>
-      <tr><td>Standard error of one accuracy from the finite row sample, $\sqrt{p(1-p)/n}$</td><td class="yellow">≈ 1.1 pts</td></tr>
+      <tr><td>Spread of MLP accuracy across seeds (3 seeds, default MLP)</td><td class="green">≈ 0.6 pts</td></tr>
+      <tr><td>Standard error of one accuracy from the finite row sample, $\sqrt{p(1-p)/n}$ at $p \approx 0.79$</td><td class="yellow">≈ 1.0 pts</td></tr>
     </table>
     <p>
       A seed-based test would call a 0.3-point difference "highly significant" when it is well inside what a different
@@ -268,7 +274,7 @@
     </div>
     <p>Both conditions are scored on the <em>same</em> rows, so they are compared row by row:</p>
     <div class="math-block">
-      $$d_i = \bar s_{\text{level},i} - \bar s_{\text{ref},i}, \qquad \hat\Delta = \frac{1}{n}\sum_{i=1}^{n} d_i$$
+      $$d_i = \bar s_{a,i} - \bar s_{b,i}, \qquad \hat\Delta = \frac{1}{n}\sum_{i=1}^{n} d_i$$
     </div>
     <p>
       $\hat\Delta$ is the accuracy (or MSE) difference. Pairing removes the variation from rows that are easy or hard for
@@ -282,7 +288,7 @@
     <div class="math-block">
       $$\text{CI}_{95\%} = \left[\, q_{0.025}\big(\hat\Delta^{*}_1, \dots, \hat\Delta^{*}_B\big),\; q_{0.975}\big(\hat\Delta^{*}_1, \dots, \hat\Delta^{*}_B\big) \,\right]$$
     </div>
-<pre><code>d = level_rows - reference_rows
+<pre><code>d = a_rows - b_rows
 rng = np.random.default_rng(0)                    # reproducible
 means = d[rng.integers(0, n, size=(B, n))].mean(axis=1)
 low, high = np.percentile(means, [2.5, 97.5])</code></pre>
@@ -307,6 +313,23 @@ low, high = np.percentile(means, [2.5, 97.5])</code></pre>
     </p>
   </div>
 
+  <!-- ===== 5b. LEADER AND CONTENDERS ===== -->
+  <div class="section">
+    <div class="section-header">
+      <span class="badge">5b</span>
+      <h2>Leader and contenders (selection mode)</h2>
+    </div>
+    <p>The <strong>leader</strong> is the candidate with the best validation mean. A candidate is a <strong>contender</strong> unless its interval against the leader lies entirely on the worse side of zero:</p>
+    <div class="math-block">
+      $$L = \arg\max_c \; \sigma\, m_c, \qquad \mathcal{C} = \{\, c : \text{verdict}(c \text{ vs } L) \neq \text{worse} \,\}$$
+    </div>
+    <p>
+      ($\sigma = +1$ for accuracy, $-1$ for MSE.) Only contenders may be refined, one knob at a time; when every contender
+      belongs to one family the loop stops by itself, because tuning cannot change which family is best. These validation
+      intervals are uncorrected on purpose: they steer the next experiment and are never reported as a claim.
+    </p>
+  </div>
+
   <!-- ===== 6. TRAIN / VAL / TEST ===== -->
   <div class="section">
     <div class="section-header">
@@ -316,14 +339,16 @@ low, high = np.percentile(means, [2.5, 97.5])</code></pre>
     <table>
       <tr><th>Split</th><th>Share</th><th>Used for</th></tr>
       <tr><td>train</td><td>70%</td><td>fitting the models</td></tr>
-      <tr><td>validation</td><td>15%</td><td>every decision inside the loop: results table, which levels to explore, which level is best</td></tr>
-      <tr><td>test</td><td>15%</td><td><strong>once</strong>, at the end: best validation level vs reference</td></tr>
+      <tr><td>validation</td><td>15%</td><td>every decision inside the loop: results table, leader and contenders, what to refine, which candidate wins</td></tr>
+      <tr><td>test</td><td>15%</td><td><strong>once</strong>, at the end: the winner vs the reference, and in selection mode vs the best candidate of another family</td></tr>
     </table>
     <p>
       The loop looks at validation results after every round and adapts to them. Testing repeatedly on the data you adapt
       to — "run more until p &lt; 0.05" — inflates false positives. Here that cannot happen: the confirmatory comparison is on
-      rows the loop never saw, and it is <em>one comparison chosen before looking</em>, so no multiple-comparison correction
-      is needed either. Validation results in the UI are labelled exploratory for this reason.
+      rows the loop never saw, and the comparisons are <em>chosen from validation before looking</em>. With $k$ comparisons
+      (1 in effect mode, up to 2 in selection mode) each interval is computed at $1 - 0.05/k$ — 95% or 97.5% (Bonferroni),
+      so the claims share a 5% error budget. The report also gives the winner's test score with its own interval and how
+      much it dropped from validation to test (selection optimism). Validation results in the UI are labelled exploratory.
     </p>
   </div>
 
@@ -368,17 +393,17 @@ low, high = np.percentile(means, [2.5, 97.5])</code></pre>
       <div class="summary-card">
         <div class="stat-name">Difference</div>
         <div class="stat-val">How much?</div>
-        <div class="stat-desc">$\hat\Delta$: accuracy (pts) or MSE difference vs the reference.</div>
+        <div class="stat-desc">$\hat\Delta$: accuracy (pts) or MSE difference between two candidates.</div>
       </div>
       <div class="summary-card">
-        <div class="stat-name">95% CI</div>
+        <div class="stat-name">CI (95% / 97.5%)</div>
         <div class="stat-val">How sure?</div>
         <div class="stat-desc">Paired bootstrap over rows. Not crossing 0 settles the direction.</div>
       </div>
       <div class="summary-card">
         <div class="stat-name">Seed spread</div>
         <div class="stat-val">How stable?</div>
-        <div class="stat-desc">Std across a level's training runs — stability, not uncertainty.</div>
+        <div class="stat-desc">Std across a candidate's training runs — stability, not uncertainty.</div>
       </div>
       <div class="summary-card">
         <div class="stat-name">Majority floor</div>
@@ -388,9 +413,11 @@ low, high = np.percentile(means, [2.5, 97.5])</code></pre>
     </div>
 
     <div class="example-box" style="margin-top:20px;">
-      <div class="label">A real report (diabetes_risk.csv, dropout)</div>
+      <div class="label">A real report (diabetes_risk.csv, “Which model performs best?”, LLM replies scripted)</div>
       <p>
-        Headline, built by code: <code>dropout=0.1 vs dropout=0 · accuracy 74.7% vs 72.5% · +2.2 pts · 95% CI +1.1 to +3.4 pts · better</code>
+        Logistic regression led on validation, so its strongest alternative was tested. Test split, 1,575 rows, two
+        comparisons at 97.5%: <code>random_forest (min_samples_leaf=5, max_depth=12) vs linear_baseline · 79.6% vs 80.8% · −1.2 pts · CI −2.3 to −0.1 · worse</code>
+        and <code>vs mlp · +0.2 pts · CI −1.1 to +1.6 · inconclusive (tied)</code>.
       </p>
       <p style="margin-top:10px; color:#a5b4fc; font-style:italic;">
         The LLM's interpretation then explains it in a few sentences — citing these numbers, never computing them —

@@ -34,12 +34,14 @@ GROQ_MODEL: str = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")
 # ---------------------------------------------------------------------------
 MAX_ROUNDS: int = int(os.environ.get("MAX_ROUNDS", "3"))
 """Rounds of experiments per investigation: the initial plan plus up to
-MAX_ROUNDS - 1 rounds the Recommender chooses to explore."""
+MAX_ROUNDS - 1 rounds the Recommender chooses to refine. Together with the
+3-candidate cap per round it bounds runs and LLM calls (MAX_ROUNDS + 1)."""
 
 N_SEEDS: int = int(os.environ.get("N_SEEDS", "3"))
-"""Training runs per MLP condition. Seeds average out initialisation noise;
-they are not the statistical sample (evaluation rows are - see tools/stats.py).
-linear_baseline is seed-independent and always runs once."""
+"""Training runs per candidate of a seeded family (random forest, MLP). Seeds
+average out initialisation noise; they are not the statistical sample
+(evaluation rows are - see tools/stats.py). The linear model and the decision
+tree are seed-independent and always run once."""
 
 # ---------------------------------------------------------------------------
 # API

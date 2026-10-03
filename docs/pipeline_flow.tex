@@ -1,0 +1,767 @@
+% ============================================================================
+%  pipeline_flow.tex -- how the Adaptive ML Experiment Agent answers a
+%  research question, explained for a reader who has never seen the code.
+%
+%  Part 1: the mental model.  Part 2: the setup both modes share.
+%  Part 3: Selection Mode end to end.  Part 4: Effect Mode end to end.
+%  Part 5: the two modes side by side.
+%
+%  Every number marked "real run" comes from running the current code on
+%  diabetes_risk.csv (real ingestion, training and statistics; the LLM
+%  replies were scripted, as in the test suite). Numbers marked
+%  "illustration" only show the mechanism.
+%
+%  Compile:  pdflatex pipeline_flow.tex    or    tectonic pipeline_flow.tex
+% ============================================================================
+\documentclass[11pt]{article}
+\usepackage[a4paper,margin=1.6cm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[scaled=0.94]{helvet}
+\renewcommand{\familydefault}{\sfdefault}
+\usepackage[scaled=0.96]{inconsolata}
+\usepackage{amsmath,amssymb}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,calc,fit,backgrounds}
+\usepackage[most]{tcolorbox}
+\usepackage{booktabs,tabularx,array}
+\usepackage{enumitem}
+\usepackage{microtype}
+\usepackage{ragged2e}
+\usepackage{needspace}
+
+\pagestyle{empty}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0pt}
+
+% ---- palette ---------------------------------------------------------------
+% ink/rule/soft: text and structure. One colour per kind of actor:
+%   code (grey), Planner LLM (blue), Recommender LLM (violet),
+%   validation (green), sealed test (red).
+\definecolor{ink}{HTML}{1B1F24}
+\definecolor{rule}{HTML}{BCC3CC}
+\definecolor{soft}{HTML}{F2F4F6}
+\definecolor{plan}{HTML}{1F4E79}  \definecolor{planbg}{HTML}{DCE8F4}
+\definecolor{rec}{HTML}{6A3D9A}   \definecolor{recbg}{HTML}{ECE4F5}
+\definecolor{val}{HTML}{2E7D4F}   \definecolor{valbg}{HTML}{E2F1E7}
+\definecolor{tst}{HTML}{B03A2E}   \definecolor{tstbg}{HTML}{F8E4E1}
+\color{ink}
+
+\setlist[enumerate]{nosep,leftmargin=1.4em,label=\textbf{\arabic*.},itemsep=2pt}
+\setlist[itemize]{nosep,leftmargin=1.1em,label=--,itemsep=2pt}
+\newcolumntype{Y}{>{\RaggedRight\arraybackslash}X}
+\renewcommand{\arraystretch}{1.2}
+
+% ---- building blocks ------------------------------------------------------
+\newcommand{\dat}[1]{\texttt{#1}}
+\newcommand{\gap}{\par\vspace{7pt}}
+\newcommand{\lbl}[1]{{\footnotesize\bfseries\color{plan}\MakeUppercase{#1}}\par\vspace{3pt}}
+\newcommand{\partx}[2]{\par\needspace{8\baselineskip}\vspace{6pt}%
+  \noindent{\large\bfseries #1\enspace #2}\par\nobreak\vspace{3pt}\nobreak
+  {\color{rule}\hrule height 0.8pt}\nobreak\vspace{8pt}}
+\newcommand{\step}[3]{\par\needspace{5\baselineskip}\vspace{9pt}%
+  \noindent{\bfseries\color{plan}#1}\enspace{\bfseries #2}\hfill #3\par\nobreak\vspace{4pt}}
+\newcommand{\note}[1]{{\small\color{black!62}#1}}
+\newcommand{\tagcode}{\colorbox{soft}{\footnotesize\strut deterministic code}}
+\newcommand{\tagplan}{\colorbox{planbg}{\footnotesize\strut\color{plan}\textbf{Planner LLM}}}
+\newcommand{\tagrec}{\colorbox{recbg}{\footnotesize\strut\color{rec}\textbf{Recommender LLM}}}
+\newcommand{\tagval}{\colorbox{valbg}{\footnotesize\strut\color{val}\textbf{validation}}}
+\newcommand{\tagtst}{\colorbox{tstbg}{\footnotesize\strut\color{tst}\textbf{sealed test}}}
+
+\newtcolorbox{panel}[1][]{%
+  enhanced, colback=soft, colframe=soft, boxrule=0pt, arc=1.5pt,
+  left=6pt, right=6pt, top=4pt, bottom=4pt, before skip=3pt, after skip=4pt,
+  before upper=\RaggedRight, #1}
+\newtcolorbox{keybox}[1][]{%
+  enhanced, colback=white, colframe=plan, boxrule=0.7pt, arc=1.5pt,
+  left=7pt, right=7pt, top=5pt, bottom=5pt, before skip=4pt, after skip=6pt,
+  before upper=\RaggedRight, #1}
+
+% ---- TikZ styles shared by every diagram ----------------------------------
+\tikzset{
+  box/.style={draw=rule, fill=white, rounded corners=2pt, line width=0.6pt,
+    align=center, font=\small, inner sep=4pt, minimum height=7mm},
+  code/.style={box},
+  planner/.style={box, draw=plan, fill=planbg, line width=1pt},
+  recom/.style={box, draw=rec, fill=recbg, line width=1pt},
+  valid/.style={box, draw=val, fill=valbg, line width=1pt},
+  test/.style={box, draw=tst, fill=tstbg, line width=1pt},
+  io/.style={box, fill=soft},
+  q/.style={box, fill=soft, font=\small\itshape},
+  arr/.style={-{Stealth[length=2mm]}, line width=0.7pt, black!55},
+  lab/.style={font=\footnotesize\color{black!60}},
+  run/.style={draw=rule, fill=white, rounded corners=1.5pt, font=\scriptsize\ttfamily,
+    inner sep=2pt, minimum height=4.5mm},
+}
+
+\begin{document}
+\RaggedRight
+
+% ============================================================================
+%  PART 1 -- THE MENTAL MODEL
+% ============================================================================
+{\fontsize{18}{22}\selectfont\bfseries How the Adaptive ML Experiment Agent answers a question}\par
+\vspace{3pt}
+{\color{black!60}A research question and a CSV go in; a statistically honest answer comes out.
+This page is the whole idea. The rest of the document opens each box.}\par
+\vspace{8pt}
+
+\begin{center}
+\begin{tikzpicture}[node distance=5mm]
+  % main column
+  \node[io, minimum width=6.6cm] (q) {\textbf{Question + dataset}};
+  \node[code, minimum width=6.6cm, below=of q] (ing) {Ingest \& profile the dataset};
+  \node[planner, minimum width=6.6cm, below=of ing] (pl) {\textbf{Planner LLM}: choose the initial experiment design};
+  \node[code, minimum width=6.6cm, below=of pl] (des) {Build candidates, then seeds $\rightarrow$ runs};
+  \node[code, minimum width=6.6cm, below=of des] (run) {Run experiments (train every run)};
+  \node[valid, minimum width=6.6cm, below=of run] (va) {\textbf{Validation analysis}: averages, paired bootstrap};
+  \node[code, minimum width=6.6cm, below=of va, minimum height=9mm] (dec) {\textbf{Decide}\\[-1pt]{\footnotesize code checks the stop rules first}};
+  \node[code, minimum width=6.6cm, below=10mm of dec] (fin) {Finalize: choose the final comparisons};
+  \node[test, minimum width=6.6cm, below=of fin] (te) {\textbf{Test set opened once}: confirmatory comparisons};
+  \node[code, minimum width=6.6cm, below=of te] (rep) {Report \;{\footnotesize(+ LLM explanation of the numbers)}};
+  \foreach \a/\b in {q/ing, ing/pl, pl/des, des/run, run/va, va/dec, fin/te, te/rep}
+    \draw[arr] (\a) -- (\b);
+  \draw[arr] (dec) -- node[right, lab] {conclude} (fin);
+  % loop column (right)
+  \node[recom, text width=3.4cm, right=12mm of dec] (rc) {\textbf{Recommender LLM}\\[-1pt]{\footnotesize proposes one refinement}};
+  \node[code, text width=3.4cm, right=12mm of run] (vb) {Code validates it and builds new candidates};
+  \draw[arr] (dec) -- node[above, lab] {refine} (rc);
+  \draw[arr] (rc) -- (vb);
+  \draw[arr] (vb) -- node[above, lab] {new runs} (run);
+  \draw[arr] (rc.south) |- node[pos=0.25, right, lab] {conclude} (fin.east);
+  % sealed test (left)
+  \node[test, text width=2.7cm, left=12mm of va, font=\footnotesize] (vault) {\textbf{TEST rows}\\scored at training time,\\ \textbf{sealed}};
+  \draw[arr, tst, dashed] (run.west) -| node[pos=0.25, above, lab] {stored} (vault.north);
+  \draw[arr, tst, dashed] (vault.south) |- node[pos=0.75, above, lab] {read once} (te.west);
+  % the loop label
+  \node[lab, right=1mm of vb.north east, anchor=south east, yshift=1mm] {the adaptive loop};
+\end{tikzpicture}
+\end{center}
+
+\vspace{4pt}
+\begin{tabularx}{\linewidth}{@{}l Y@{}}
+\tagcode & Every rule and every number: candidates, seeds, training, statistics, stop rules, validation of LLM proposals.\\
+\tagplan & One call. Reads the question and dataset \emph{counts}; returns the initial design. Trains nothing, computes nothing, never sees a data row.\\
+\tagrec & At most one call per round. Reads a compact summary of validation results; \emph{recommends} one refinement or stopping. Code decides whether it is allowed.\\
+\tagval & The only data the adaptive loop ever looks at. Paired bootstrap happens here, every round.\\
+\tagtst & Scored when each model is trained, then sealed. Read exactly once, after the loop has stopped and the comparisons are fixed.\\
+\end{tabularx}
+
+\vspace{6pt}
+\begin{keybox}
+\textbf{Two kinds of question, one skeleton.}
+\textbf{Selection Mode} asks \emph{which model family is best?} --- the initial design is several model
+families, and refinement tunes one knob of a family still in the race.
+\textbf{Effect Mode} asks \emph{does factor X matter?} --- the initial design is several levels of one
+factor, and refinement only adds more levels of that same factor. Training, seeds, the bootstrap and the
+sealed test set work identically in both.
+\end{keybox}
+
+% ============================================================================
+%  PART 2 -- COMMON SETUP
+% ============================================================================
+\newpage
+\partx{2}{Common setup --- the same for both modes}
+
+\step{A}{Ingest \& profile}\tagcode
+
+\begin{minipage}[t]{0.52\linewidth}
+\vspace{0pt}
+\begin{itemize}
+\item \textbf{In:} the CSV, the target column the user names (never guessed), the question.
+\item Rows with any missing value are dropped (no imputation).
+\item Task type: text target, or $\le 20$ whole-number values $\rightarrow$ classification;
+      otherwise regression.
+\item Categorical columns are one-hot encoded.
+\item One fixed split for every run, ever: \textbf{70\,\% train / 15\,\% validation / 15\,\% test}.
+\item \textbf{Out:} a \dat{DatasetProfile} (counts, classes, split seed).
+\end{itemize}
+\end{minipage}\hfill
+\begin{minipage}[t]{0.44\linewidth}
+\vspace{0pt}
+\begin{panel}
+\small\textbf{Real run --- \dat{diabetes\_risk.csv}}\par\vspace{2pt}
+15\,000 rows $\rightarrow$ 10\,500 after dropping missing values\\
+target \dat{diabetes\_risk}: Low / Moderate / High $\rightarrow$ classification\\
+18 feature columns $\rightarrow$ 49 after one-hot\\
+split: 7\,350 train / 1\,575 validation / 1\,575 test\\
+always predicting ``Low'' scores 60.0\,\% (the sanity floor)
+\end{panel}
+\end{minipage}
+
+\step{B}{Planner LLM --- the initial design}\tagplan
+
+\begin{center}
+\begin{tikzpicture}[node distance=4mm]
+  \node[io, text width=4.6cm, font=\footnotesize] (in) {\textbf{Receives}\\question text\\+ dataset \emph{counts}: task, target name,\\rows, column counts, class sizes};
+  \node[planner, right=8mm of in, text width=3.1cm] (pl) {\textbf{Planner LLM}\\{\footnotesize one call, strict JSON}};
+  \node[code, right=8mm of pl, text width=3.9cm, font=\footnotesize] (ck) {\textbf{Code checks the design}\\families / factor exist,\\levels distinct and in range\\(a violation is sent back once)};
+  \draw[arr] (in) -- (pl); \draw[arr] (pl) -- (ck);
+  \coordinate (j) at ($(pl.south)+(0,-9mm)$);
+  \node[box, draw=plan, line width=1pt, text width=5.4cm, font=\footnotesize, anchor=north] (sel)
+    at ($(j)+(-3.3,-5mm)$)
+    {\textbf{IF mode = SELECTION}\\2--4 model families to compare\\$\rightarrow$ Part 3};
+  \node[box, draw=plan, line width=1pt, text width=5.4cm, font=\footnotesize, anchor=north] (eff)
+    at ($(j)+(3.3,-5mm)$)
+    {\textbf{IF mode = EFFECT}\\one factor, 2--5 levels, a reference level,\\the base configuration $\rightarrow$ Part 4};
+  \draw[line width=0.7pt, black!55] (ck.south) |- (j);
+  \draw[arr] (j) -| (sel.north);
+  \draw[arr] (j) -| (eff.north);
+\end{tikzpicture}
+\end{center}
+
+\begin{minipage}[t]{0.48\linewidth}
+\textbf{The Planner does NOT}
+\begin{itemize}
+\item train models or run experiments,
+\item calculate any statistic,
+\item see individual data rows or column names.
+\end{itemize}
+\end{minipage}\hfill
+\begin{minipage}[t]{0.48\linewidth}
+\textbf{The four model families it can choose from}\\[2pt]
+{\small logistic / linear regression (\dat{linear\_baseline}), decision tree, random forest, MLP
+(one hidden layer). Each has fixed defaults and allowed ranges in a code registry.}
+\end{minipage}
+
+\vspace{8pt}
+\begin{keybox}
+\textbf{Candidate $\neq$ run.} A \textbf{candidate} is one configuration --- model family + hyperparameters
++ preprocessing --- \emph{without} a random seed. A \textbf{run} is one actual training of a candidate
+with one seed. Random forests and MLPs depend on the seed, so each of their candidates is trained
+\textbf{3 times} (seeds 0, 1, 2). Logistic regression and the decision tree do not, so they are trained
+\textbf{once}. Every statistic is computed per \emph{candidate}, after averaging its runs.
+\end{keybox}
+
+% ============================================================================
+%  PART 3 -- SELECTION MODE
+% ============================================================================
+\newpage
+\partx{3}{Selection Mode --- ``which model family is best?''}
+
+{\small Running example (real run): \emph{``Which model performs best for classification on this
+dataset?''}; the Planner chooses all four families.}
+
+\begin{center}
+\begin{tikzpicture}[node distance=4.2mm]
+  \node[code, minimum width=6.4cm] (s1) {S1\; one root candidate per family};
+  \node[code, minimum width=6.4cm, below=of s1] (s2) {S2\; seeds $\rightarrow$ runs};
+  \node[code, minimum width=6.4cm, below=of s2] (s3) {S3\; train; score every val \& test row};
+  \node[valid, minimum width=6.4cm, below=of s3] (s4) {S4\; average seeds, find the leader};
+  \node[valid, minimum width=6.4cm, below=of s4] (s5) {S5\; paired bootstrap $\rightarrow$ contenders};
+  \node[code, minimum width=6.4cm, below=of s5] (s6) {S6\; stop rules (code)};
+  \node[code, minimum width=6.4cm, below=9mm of s6] (s8) {S8\; choose winner $W$ + runner-up $R$};
+  \node[test, minimum width=6.4cm, below=of s8] (s9) {S8\; open test: $W$ vs reference, $W$ vs $R$};
+  \foreach \a/\b in {s1/s2,s2/s3,s3/s4,s4/s5,s5/s6,s8/s9} \draw[arr] (\a) -- (\b);
+  \draw[arr] (s6) -- node[right, lab] {stop} (s8);
+  \node[recom, text width=3.6cm, right=12mm of s6] (r) {S6\; \textbf{Recommender}:\\{\footnotesize one contender, one knob,\\1--3 values}};
+  \node[code, text width=3.6cm, right=12mm of s2] (b) {S7\; code validates,\\builds 1--3 children};
+  \draw[arr] (s6) -- node[above, lab] {continue} (r);
+  \draw[arr] (r) -- (b);
+  \draw[arr] (b) -- node[above, lab] {new} (s2);
+  \draw[arr] (r.south) |- node[pos=0.25, right, lab] {conclude} (s8.east);
+\end{tikzpicture}
+\end{center}
+
+% ---------------------------------------------------------------- S1 + S2
+\step{S1}{Create root candidates}\tagcode
+
+Each chosen family gets exactly \textbf{one} root candidate at its registry defaults. The simplest chosen
+family (order: linear $<$ tree $<$ forest $<$ MLP) becomes the \textbf{reference} --- the baseline every
+other candidate is measured against.
+
+\begin{panel}
+\small\ttfamily
+c1 = linear\_baseline \hfill \textsf{reference}\\
+c2 = decision\_tree \ (max\_depth 8)\\
+c3 = random\_forest \ (200 trees)\\
+c4 = mlp \ (hidden 64, 20 epochs, features normalized)
+\end{panel}
+
+\step{S2}{Expand candidates into runs}\tagcode
+
+\begin{minipage}[t]{0.47\linewidth}
+\vspace{0pt}
+\begin{tikzpicture}[x=1cm, y=-0.62cm]
+  \node[code, anchor=west, font=\footnotesize, minimum height=5mm] (a) at (0,0) {c1 linear};
+  \node[code, anchor=west, font=\footnotesize, minimum height=5mm] (b) at (0,1) {c2 tree};
+  \node[code, anchor=west, font=\footnotesize, minimum height=5mm] (c) at (0,2.6) {c3 forest};
+  \node[code, anchor=west, font=\footnotesize, minimum height=5mm] (d) at (0,5.6) {c4 MLP};
+  \node[run, anchor=west] (a0) at (3.0,0) {run: seed 0};
+  \node[run, anchor=west] (b0) at (3.0,1) {run: seed 0};
+  \foreach \s/\y in {0/1.8,1/2.6,2/3.4} \node[run, anchor=west] (c\s) at (3.0,\y) {run: seed \s};
+  \foreach \s/\y in {0/4.8,1/5.6,2/6.4} \node[run, anchor=west] (d\s) at (3.0,\y) {run: seed \s};
+  \draw[arr] (a) -- (a0); \draw[arr] (b) -- (b0);
+  \foreach \s in {0,1,2} { \draw[arr] (c.east) -- (c\s.west); \draw[arr] (d.east) -- (d\s.west); }
+  \node[lab, anchor=west] at (4.75,0) {seed-independent};
+  \node[lab, anchor=west] at (4.75,1) {seed-independent};
+\end{tikzpicture}
+\end{minipage}\hfill
+\begin{minipage}[t]{0.49\linewidth}
+\vspace{2pt}
+\begin{panel}
+\textbf{4 candidates $\rightarrow$ 8 actual training runs.}\par\vspace{3pt}
+\small A seed changes only randomness \emph{inside} training (weight initialisation, dropout masks,
+batch order, a forest's bootstrap samples). It never changes which rows are train, validation or test.
+\end{panel}
+\end{minipage}
+
+% ---------------------------------------------------------------- S3
+\needspace{17\baselineskip}
+\step{S3}{Train --- and score every row}\tagcode
+
+\begin{center}
+\begin{tikzpicture}
+  \node[code, minimum width=7.6cm, minimum height=8mm, anchor=west] (tr) at (0,0) {\textbf{TRAIN} 70\,\% (7\,350 rows) $\rightarrow$ fit the model};
+  \node[valid, minimum width=3.5cm, minimum height=8mm, anchor=west, right=1mm of tr] (vl) {\textbf{VALIDATION} 15\,\%};
+  \node[test, minimum width=3.5cm, minimum height=8mm, anchor=west, right=1mm of vl] (ts) {\textbf{TEST} 15\,\%};
+  \node[font=\footnotesize\ttfamily, below=2mm of vl] (vs) {1 0 1 1 \dots{} \textsf{1\,575 rows}};
+  \node[font=\footnotesize\ttfamily, below=2mm of ts] (tss) {0 1 1 1 \dots{} \textsf{1\,575 rows}};
+  \draw[arr, val] (vl) -- (vs); \draw[arr, tst] (ts) -- (tss);
+  \node[font=\footnotesize\color{val}\bfseries, below=0.5mm of vs] {available to the analysis};
+  \node[font=\footnotesize\color{tst}\bfseries, below=0.5mm of tss] {stored, \textbf{sealed}};
+\end{tikzpicture}
+\end{center}
+
+\begin{minipage}[t]{0.5\linewidth}
+Each run scores \textbf{every} validation row and \textbf{every} test row --- not just one accuracy number:
+\[
+\text{score}(i) =
+\begin{cases}
+1 \text{ correct},\; 0 \text{ wrong} & \text{classification}\\
+(\hat y_i - y_i)^2 & \text{regression}
+\end{cases}
+\]
+\end{minipage}\hfill
+\begin{minipage}[t]{0.46\linewidth}
+\vspace{2pt}
+{\small It also records the same metric on the \emph{training} rows (to spot overfitting), the training
+loss and the time. A run that crashes or produces NaN/Inf is marked \dat{failed}; every other run counts
+as evidence. Each run is saved as it finishes.}
+\end{minipage}
+
+% ---------------------------------------------------------------- S4
+\step{S4}{Validation analysis --- average the seeds, find the leader}\tagval
+
+\begin{minipage}[t]{0.5\linewidth}
+\vspace{0pt}
+\textbf{First, seeds are averaged row by row} \note{(illustration)}\par\vspace{3pt}
+{\small
+\begin{tabular}{@{}l c c c c c@{}}
+ & row 1 & row 2 & row 3 & row 4 & \dots\\ \midrule
+forest seed 0 & 1 & 0 & 1 & 1 & \\
+forest seed 1 & 1 & 1 & 1 & 0 & \\
+forest seed 2 & 0 & 1 & 1 & 1 & \\ \midrule
+\textbf{c3 forest} & \textbf{.67} & \textbf{.67} & \textbf{1} & \textbf{.67} & \\
+\end{tabular}}
+\par\vspace{4pt}
+{\small $\Rightarrow$ one validation score \emph{per row} per candidate. Its mean over the 1\,575 rows is
+the candidate's validation accuracy.}
+\end{minipage}\hfill
+\begin{minipage}[t]{0.45\linewidth}
+\vspace{0pt}
+\textbf{Then each candidate gets one number} \note{(real run)}\par\vspace{3pt}
+{\small
+\begin{tabular}{@{}l r r@{}}
+\toprule
+candidate & validation & train\\ \midrule
+c1 linear (reference) & \textbf{79.05\,\%} & 80.0\,\%\\
+c2 tree & 75.75\,\% & 83.4\,\%\\
+c3 forest & 78.20\,\% & 100.0\,\%\\
+c4 MLP & 77.40\,\% & 85.0\,\%\\
+\bottomrule
+\end{tabular}}
+\par\vspace{4pt}
+{\small The \textbf{leader} is simply the candidate with the best \emph{observed} validation score:
+here \dat{c1}. It is not automatically the final answer.}
+\end{minipage}
+
+% ---------------------------------------------------------------- S5
+\step{S5}{Paired bootstrap --- is a difference real or noise?}\tagval
+
+\begin{center}
+\begin{tikzpicture}[node distance=6mm]
+  \node[valid, text width=3.2cm, font=\footnotesize] (p1) {same validation row $i$\\$d_i = \text{score}_A(i) - \text{score}_B(i)$};
+  \node[code, text width=2.9cm, font=\footnotesize, right=of p1] (p2) {$d_1, d_2, \dots, d_{1575}$\\observed difference\\$\hat\Delta = \text{mean}(d)$};
+  \node[code, text width=2.9cm, font=\footnotesize, right=of p2] (p3) {resample the rows\\with replacement,\\\textbf{2\,000 times}};
+  \node[code, text width=2.6cm, font=\footnotesize, right=of p3] (p4) {middle 95\,\% of the\\2\,000 means\\= \textbf{95\,\% CI}};
+  \draw[arr] (p1) -- (p2); \draw[arr] (p2) -- (p3); \draw[arr] (p3) -- (p4);
+\end{tikzpicture}
+\end{center}
+
+{\small Pairing by row matters: rows that are easy or hard for \emph{every} model cancel out, so the interval
+reflects how the two candidates actually differ. The uncertainty comes from the finite set of validation
+rows --- not from the seeds. All of this is numpy code; no LLM is involved.}
+
+\vspace{6pt}
+\textbf{Three comparisons, three different jobs}\par\vspace{3pt}
+{\small
+\begin{tabularx}{\linewidth}{@{}l Y Y@{}}
+\toprule
+\textbf{comparison} & \textbf{question it answers} & \textbf{what it is used for}\\ \midrule
+\textbf{vs Leader} & Is this candidate clearly worse than the best one observed so far? & \textbf{decides contender status} --- the only one that does\\
+vs Reference & How does it compare with the original baseline? & context for the Recommender and the UI\\
+vs Parent & Did the latest one-knob change (parent $\rightarrow$ child) help? & evidence for the next refinement (refined candidates only)\\
+\bottomrule
+\end{tabularx}}
+
+\vspace{8pt}
+\begin{minipage}[t]{0.47\linewidth}
+\vspace{0pt}
+\textbf{The contender rule (vs Leader)}\par\vspace{4pt}
+\begin{tikzpicture}[node distance=3mm]
+  \node[valid, text width=3.4cm, font=\footnotesize] (c) {CI of (candidate $-$ leader)};
+  \node[code, text width=3.0cm, font=\footnotesize, below left=6mm and -1.2cm of c] (w) {entirely below 0\\$\rightarrow$ clearly worse\\$\rightarrow$ \textbf{eliminated}};
+  \node[code, text width=3.0cm, font=\footnotesize, below right=6mm and -1.2cm of c, draw=val, line width=1pt] (k) {overlaps 0\\$\rightarrow$ not clearly worse\\$\rightarrow$ \textbf{contender}};
+  \draw[arr] (c) -- (w); \draw[arr] (c) -- (k);
+\end{tikzpicture}
+\par\vspace{3pt}
+\note{The leader is always a contender. For MSE (lower is better) ``worse'' means entirely above 0.
+An eliminated family is never refined.}
+\end{minipage}\hfill
+\begin{minipage}[t]{0.49\linewidth}
+\vspace{0pt}
+\textbf{Real run, after round 1} \note{(vs leader c1, percentage points)}\par\vspace{3pt}
+{\small
+\begin{tabular}{@{}l r l@{}}
+\toprule
+candidate & difference & 95\,\% CI $\rightarrow$ status\\ \midrule
+c1 linear & --- & leader $\rightarrow$ \textbf{contender}\\
+c2 tree & $-3.30$ & $[-5.08, -1.59]$ $\rightarrow$ eliminated\\
+c3 forest & $-0.85$ & $[-1.90, +0.25]$ $\rightarrow$ \textbf{contender}\\
+c4 MLP & $-1.65$ & $[-2.88, -0.38]$ $\rightarrow$ eliminated\\
+\bottomrule
+\end{tabular}}
+\par\vspace{4pt}
+\note{The forest is only 0.85 points behind and that gap is within noise, so it stays in the race.
+The MLP is only 1.65 points behind, but its interval never reaches 0.}
+\end{minipage}
+
+% ---------------------------------------------------------------- S6
+\step{S6}{Decide --- stop, or ask the Recommender?}{\tagcode\ \tagrec}
+
+\begin{minipage}[t]{0.47\linewidth}
+\vspace{0pt}
+\begin{tikzpicture}[node distance=5mm]
+  \node[valid, text width=3.6cm, font=\footnotesize] (v) {validation analysis\\(leader, contenders)};
+  \node[code, text width=3.6cm, font=\footnotesize, below=of v] (m) {Is this round 3\\(\dat{MAX\_ROUNDS})?};
+  \node[code, text width=3.6cm, font=\footnotesize, below=of m] (f) {Are all contenders the\\same model family?};
+  \node[recom, text width=3.6cm, font=\footnotesize, below=of f] (r) {ask the \textbf{Recommender}};
+  \node[code, text width=1.7cm, font=\footnotesize, right=7mm of m] (c1) {CONCLUDE\\{\scriptsize budget}};
+  \node[code, text width=1.7cm, font=\footnotesize, right=7mm of f] (c2) {CONCLUDE\\{\scriptsize settled}};
+  \node[code, text width=1.7cm, font=\footnotesize, right=7mm of r] (c3) {REFINE or\\CONCLUDE};
+  \draw[arr] (v) -- (m);
+  \draw[arr] (m) -- node[left, lab] {no} (f);
+  \draw[arr] (f) -- node[left, lab] {no} (r);
+  \draw[arr] (m) -- node[above, lab] {yes} (c1);
+  \draw[arr] (f) -- node[above, lab] {yes} (c2);
+  \draw[arr] (r) -- (c3);
+\end{tikzpicture}
+\end{minipage}\hfill
+\begin{minipage}[t]{0.49\linewidth}
+\vspace{0pt}
+{\small The two stop rules are code, checked before any LLM call. ``Settled'' means tuning can no longer
+change \emph{which family} is best. In the real run the contenders after round 1 were linear and forest
+--- two families --- so the Recommender was asked.}
+\par\vspace{5pt}
+{\small
+\begin{tabularx}{\linewidth}{@{}Y Y@{}}
+\toprule
+\textbf{The Recommender sees} & \textbf{It never sees}\\ \midrule
+each candidate's family, parent and change; validation and train score; overfitting gap; seed spread;
+contender flag; differences + CIs vs reference, leader and parent; the allowed knob ranges of the
+contenders' families; rounds left
+& raw dataset rows; per-row score arrays; anything from the test set; earlier conversations\\
+\bottomrule
+\end{tabularx}}
+\par\vspace{3pt}
+\note{It receives these as one compact JSON object --- about 730 tokens in the real run.}
+\end{minipage}
+
+% ---------------------------------------------------------------- S7
+\needspace{20\baselineskip}
+\step{S7}{Refine --- one contender, one knob, 1--3 values}{\tagrec\ \tagcode}
+
+\begin{minipage}[t]{0.5\linewidth}
+\vspace{0pt}
+\textbf{What the Recommender may change}
+\begin{enumerate}
+\item pick \textbf{one} parent --- it must be a contender;
+\item pick \textbf{one} knob of that parent's family (e.g.\ forest: \dat{max\_depth},
+      \dat{min\_samples\_leaf}, \dat{max\_features});
+\item propose \textbf{1--3 values}, each inside the knob's allowed range.
+\end{enumerate}
+\par\vspace{4pt}
+\textbf{What code checks before anything runs}
+\begin{itemize}
+\item all three rules above;
+\item no new configuration was already tried;
+\item a violation is sent back to the LLM once; an invalid second answer fails the investigation.
+\end{itemize}
+\par\vspace{4pt}
+\note{Linear regression has no tunable knobs, so after round 1 the only refinable contender was the forest.
+A request to refine the MLP (c4) is rejected: ``c4 is not a contender''.}
+\end{minipage}\hfill
+\begin{minipage}[t]{0.46\linewidth}
+\vspace{0pt}
+\textbf{Example} \note{(illustration with the maximum of 3 values)}\par\vspace{2pt}
+{\small parent = c3 forest, knob = \dat{min\_samples\_leaf}, values = 2, 4, 8}\par\vspace{4pt}
+\begin{tikzpicture}[x=1cm, y=-1cm]
+  \node[code, font=\footnotesize] (p) at (2.1,0) {c3 forest (parent)};
+  \node[code, font=\footnotesize] (k1) at (0.55,1.15) {leaf=2};
+  \node[code, font=\footnotesize] (k2) at (2.1,1.15) {leaf=4};
+  \node[code, font=\footnotesize] (k3) at (3.65,1.15) {leaf=8};
+  \foreach \k in {k1,k2,k3} \draw[arr] (p) -- (\k);
+  \foreach \k/\x in {k1/0.55,k2/2.1,k3/3.65} {
+    \node[run] (\k a) at (\x,1.95) {seed 0};
+    \node[run] (\k b) at (\x,2.45) {seed 1};
+    \node[run] (\k c) at (\x,2.95) {seed 2};
+    \draw[arr] (\k) -- (\k a);
+  }
+  \node[lab] at (5.0,1.15) {3 new};
+  \node[lab] at (5.0,1.45) {candidates};
+  \node[lab] at (5.0,2.45) {9 runs};
+\end{tikzpicture}
+\par\vspace{4pt}
+{\small Each child is the parent with \emph{only} \dat{min\_samples\_leaf} changed.
+\textbf{3 candidates $\times$ 3 seeds = 9 runs}, then back to S3: train $\rightarrow$ validation
+$\rightarrow$ bootstrap $\rightarrow$ new contenders $\rightarrow$ decide again.}
+\end{minipage}
+
+\vspace{8pt}
+\textbf{What the real run did} \note{(each child's ``vs parent'' difference is the effect of one knob)}\par\vspace{4pt}
+\begin{center}
+\begin{tikzpicture}[x=1cm, y=-1cm]
+  \node[code, font=\footnotesize] (c3) at (0,0) {c3 forest};
+  \node[code, font=\footnotesize] (c5) at (3.6,-0.35) {c5\, leaf=5};
+  \node[code, font=\footnotesize] (c6) at (3.6,0.45) {c6\, leaf=20};
+  \node[code, font=\footnotesize, draw=val, line width=1pt] (c7) at (7.6,-0.75) {c7\, + max\_depth=12};
+  \node[code, font=\footnotesize] (c8) at (7.6,0.05) {c8\, + max\_depth=24};
+  \draw[arr] (c3) -- (c5); \draw[arr] (c3) -- (c6);
+  \draw[arr] (c5) -- (c7); \draw[arr] (c5) -- (c8);
+  \node[lab] at (1.8,-1.55) {after round 1: refine c3};
+  \node[lab] at (5.6,-1.55) {after round 2: refine c5};
+  \node[lab, align=left, anchor=west] at (9.5,-0.35) {after round 3:\\stop (budget)};
+\end{tikzpicture}
+\end{center}
+{\small Round 2: 2 values $\times$ 3 seeds = 6 runs. Round 3: 6 runs. Total: 8 candidates, 20 runs. All
+forest children stayed contenders; none was clearly better than its parent (e.g.\ c7 vs c5:
+$+0.08$ points, CI $[-0.38, +0.53]$).}
+
+% ---------------------------------------------------------------- S8
+\step{S8}{Finalize --- the only time the test set is opened}{\tagcode\ \tagtst}
+
+\begin{minipage}[t]{0.52\linewidth}
+\vspace{0pt}
+\begin{enumerate}
+\item \textbf{Winner $W$} (validation only): the best candidate \emph{other than the reference}.
+      Normally that is the final leader; if the reference itself leads, $W$ is its strongest alternative.
+\item \textbf{Runner-up $R$} (validation only): the best candidate whose family is neither $W$'s nor the
+      reference's. If none exists, there is no second comparison.
+\item \textbf{Only now} the sealed test scores of $W$, the reference and $R$ are read.
+\item The same paired bootstrap, on the 1\,575 test rows:
+      \textbf{$W$ vs reference} and \textbf{$W$ vs $R$}.
+\end{enumerate}
+\par\vspace{5pt}
+With $k$ final comparisons, each CI uses (Bonferroni)
+\[
+\alpha = \frac{0.05}{k}:\qquad k = 2 \;\Rightarrow\; \alpha = 0.025,\; \text{confidence } 97.5\,\%
+\]
+\note{$k = 1$ (no runner-up) $\Rightarrow$ 95\,\%. The validation intervals in S5 are not corrected:
+they only choose experiments, they are never reported as the answer.}
+\end{minipage}\hfill
+\begin{minipage}[t]{0.44\linewidth}
+\vspace{0pt}
+\begin{tikzpicture}
+  \node[test, text width=4.6cm, font=\footnotesize] (t) {\textbf{TEST SET}};
+  \node[lab, below=1mm of t, text width=4.6cm, align=center] (n) {never used during the adaptive loop};
+  \node[code, text width=4.6cm, font=\footnotesize, below=5mm of n] (f) {finalize only, comparisons fixed first};
+  \draw[arr, tst, dashed] (n) -- (f);
+\end{tikzpicture}
+\par\vspace{6pt}
+\textbf{Real run} \note{(97.5\,\% CIs, percentage points)}\par\vspace{3pt}
+{\small
+\begin{tabular}{@{}l l@{}}
+\toprule
+$W$ & c7 forest (79.6\,\% on test)\\
+reference & c1 linear (80.8\,\% on test)\\
+$R$ & c4 MLP\\ \midrule
+$W$ vs reference & $-1.2$ $[-2.3, -0.1]$ \textbf{worse}\\
+$W$ vs $R$ & $+0.2$ $[-1.1, +1.6]$ \textbf{tied}\\
+\bottomrule
+\end{tabular}}
+\par\vspace{4pt}
+\note{Answer: plain logistic regression beat the tuned forest; the forest and the MLP are statistically
+tied. The report also lists 4 LLM calls, 20 runs, and how many candidates each family got.}
+\end{minipage}
+
+% ============================================================================
+%  PART 4 -- EFFECT MODE
+% ============================================================================
+\newpage
+\partx{4}{Effect Mode --- ``does factor X matter?''}
+
+{\small Running example (real run): \emph{``Does tree depth matter for a decision tree on this dataset?''}
+The Planner returns \dat{factor = max\_depth}, \dat{levels = 2, 4, 8, 16}, \dat{reference = 8},
+base model: decision tree.}
+
+\vspace{4pt}
+\begin{keybox}
+Effect Mode does \textbf{not} compare model families. Everything is held fixed except one factor, and the
+question is: \emph{does changing this factor away from the reference level make a measurable difference?}
+The factor can be \dat{model\_type}, \dat{normalize}, or any hyperparameter of the base family.
+\end{keybox}
+
+\begin{center}
+\begin{tikzpicture}[node distance=4.2mm]
+  \node[code, minimum width=6.4cm] (e1) {E1\; one candidate per level};
+  \node[code, minimum width=6.4cm, below=of e1] (e2) {seeds $\rightarrow$ runs, train (as S2--S3)};
+  \node[valid, minimum width=6.4cm, below=of e2] (e3) {E2\; each level vs the reference level};
+  \node[code, minimum width=6.4cm, below=of e3] (e4) {stop rule: round 3 reached? (code)};
+  \node[code, minimum width=6.4cm, below=9mm of e4] (e5) {E4\; choose the best non-reference level};
+  \node[test, minimum width=6.4cm, below=of e5] (e6) {E4\; open test: level vs reference ($k = 1$)};
+  \foreach \a/\b in {e1/e2,e2/e3,e3/e4,e5/e6} \draw[arr] (\a) -- (\b);
+  \draw[arr] (e4) -- node[right, lab] {stop} (e5);
+  \node[recom, text width=3.6cm, right=12mm of e4] (r) {E3\; \textbf{Recommender}:\\{\footnotesize 1--3 new levels of\\the same factor}};
+  \node[code, text width=3.6cm, right=12mm of e2] (b) {code validates, builds\\new levels from the base};
+  \draw[arr] (e4) -- node[above, lab] {continue} (r);
+  \draw[arr] (r) -- (b);
+  \draw[arr] (b) -- node[above, lab] {new} (e2);
+  \draw[arr] (r.south) |- node[pos=0.25, right, lab] {conclude} (e5.east);
+\end{tikzpicture}
+\end{center}
+
+\step{E1}{Initial candidates --- one per level}\tagcode
+
+\begin{minipage}[t]{0.45\linewidth}
+\vspace{0pt}
+\begin{tikzpicture}[x=1cm, y=-1cm]
+  \node[code, font=\footnotesize, draw=plan, line width=1pt] (r) at (0,1.2) {c1\; max\_depth=8\\{\scriptsize reference}};
+  \node[code, font=\footnotesize] (a) at (3.6,0)   {c2\; max\_depth=2};
+  \node[code, font=\footnotesize] (b) at (3.6,0.8) {c3\; max\_depth=4};
+  \node[code, font=\footnotesize] (c) at (3.6,1.6) {c4\; max\_depth=16};
+  \foreach \x in {a,b,c} \draw[arr] (r.east) -- (\x.west);
+  \node[lab] at (1.8,2.35) {only max\_depth differs};
+\end{tikzpicture}
+\end{minipage}\hfill
+\begin{minipage}[t]{0.51\linewidth}
+\vspace{0pt}
+\begin{panel}
+\small\textbf{c3 compared with c1}\par\vspace{2pt}
+same model (decision tree) $\cdot$ same preprocessing $\cdot$ same other hyperparameters\\
+\textbf{except} \dat{max\_depth = 4} instead of 8
+\end{panel}
+{\small That is what makes the comparison interpretable: any difference is caused by the factor.
+A decision tree is seed-independent, so each level is \textbf{1 run} (4 runs). An MLP factor would
+give 3 runs per level.}
+\end{minipage}
+
+\step{E2}{Run and analyse --- the same machinery, a simpler comparison}\tagval
+
+{\small Training, row scores, the sealed test set, seed averaging and the paired bootstrap are exactly
+S2--S5. The difference: every level is compared with the \textbf{reference level} only. There are no
+leader comparisons, no contenders and no ``settled'' rule in Effect Mode.}
+
+\vspace{5pt}
+\begin{minipage}[t]{0.49\linewidth}
+\vspace{0pt}
+{\small
+\begin{tabular}{@{}l r l@{}}
+\toprule
+\textbf{level vs 8} & \textbf{val} & \textbf{difference, 95\,\% CI}\\ \midrule
+8 (reference) & 75.8\,\% & ---\\
+2 & 73.9\,\% & $-1.8$ $[-3.8, +0.2]$\\
+4 & 75.6\,\% & $-0.2$ $[-2.0, +1.5]$\\
+16 & 71.6\,\% & $-4.1$ $[-6.0, -2.2]$ \textbf{worse}\\
+\bottomrule
+\end{tabular}}
+\par\vspace{2pt}
+\note{Real run, after round 1, percentage points.}
+\end{minipage}\hfill
+\begin{minipage}[t]{0.47\linewidth}
+\vspace{0pt}
+{\small The question for each row: \emph{does moving the factor from 8 to this level produce a
+measurable difference?} Depth 16 clearly hurts (it scores 98\,\% on its training rows: overfitting);
+2 and 4 are within noise of 8.}
+\end{minipage}
+
+\step{E3}{Refine --- more values of the same factor}{\tagrec\ \tagcode}
+
+\begin{minipage}[t]{0.5\linewidth}
+\vspace{0pt}
+{\small The Recommender sees the same kind of compact summary and may only propose \textbf{1--3 new values
+of the same factor}. Code forces the knob to be the factor and the parent to be the reference: every new
+level is built from the same base configuration, never from another level.}
+\par\vspace{4pt}
+\begin{itemize}
+\item[] \small after round 1: \emph{``try 6 and 12''} $\rightarrow$ c5, c6
+\item[] \small after round 2: \emph{``try 5 and 7''} $\rightarrow$ c7, c8
+\item[] \small after round 3: stop (budget)
+\end{itemize}
+\end{minipage}\hfill
+\begin{minipage}[t]{0.46\linewidth}
+\vspace{0pt}
+\begin{tikzpicture}[x=1cm, y=-0.6cm]
+  \node[code, font=\footnotesize, draw=plan, line width=1pt] (r) at (0,1.5) {c1 depth 8\\{\scriptsize reference}};
+  \foreach \l/\y/\rd in {2/-0.5/1, 4/0.25/1, 16/1.0/1, 6/1.75/2, 12/2.5/2, 5/3.25/3, 7/4.0/3}
+    { \node[run, anchor=west] (n\l) at (2.0,\y) {depth \l}; \draw[arr] (r.east) -- (n\l.west);
+      \node[lab, anchor=west] at (3.3,\y) {round \rd}; }
+\end{tikzpicture}
+\par\vspace{2pt}
+\note{Every level hangs off the reference: one factor, one star.}
+\end{minipage}
+
+\step{E4}{Finalize --- one confirmatory comparison}{\tagcode\ \tagtst}
+
+\begin{minipage}[t]{0.5\linewidth}
+\vspace{0pt}
+\begin{enumerate}
+\item From validation: the best non-reference level --- here depth 6 (77.0\,\%).
+\item Open the sealed test set once.
+\item One comparison: \textbf{selected level vs reference level}, so $k = 1$, $\alpha = 0.05$,
+      \textbf{95\,\%} --- no Bonferroni division is needed.
+\end{enumerate}
+\end{minipage}\hfill
+\begin{minipage}[t]{0.46\linewidth}
+\vspace{0pt}
+\begin{panel}
+\small\textbf{Real run --- test, 1\,575 rows}\par\vspace{2pt}
+depth 6: 78.9\,\% $\cdot$ depth 8: 77.8\,\%\\
+difference $+1.1$ points, 95\,\% CI $[-0.3, +2.4]$\\
+$\rightarrow$ \textbf{no reliable difference}\\[2pt]
+8 runs in 4 s; stopped by the round budget.
+\end{panel}
+\end{minipage}
+
+% ============================================================================
+%  PART 5 -- SIDE BY SIDE
+% ============================================================================
+\vspace{6pt}
+\partx{5}{The two modes side by side}
+
+{\small
+\begin{tabularx}{\linewidth}{@{}l Y Y@{}}
+\toprule
+ & \textbf{Selection Mode} & \textbf{Effect Mode}\\ \midrule
+Question & Which model family is best? & Does factor X matter?\\
+Initial design & 2--4 model families, each at its defaults & 1 factor, 2--5 levels, a base configuration\\
+Reference & the simplest chosen family (code picks it) & the reference level the Planner names\\
+Seeds & 3 runs per forest/MLP candidate, 1 per linear/tree candidate & same\\
+Validation comparisons & vs reference, vs leader, vs parent & vs reference only\\
+Contenders & yes: not clearly worse than the leader & none\\
+Stop rules (code) & round 3 reached, or all contenders one family & round 3 reached\\
+Refinement & one contender, one knob of its family, 1--3 values & 1--3 new levels of the same factor\\
+Parent of a new candidate & the contender it refines (can be a refined child) & always the reference level\\
+Final comparisons & $W$ vs reference, $W$ vs runner-up from another family & best level vs reference\\
+Test confidence & 97.5\,\% each if 2 comparisons (95\,\% if 1) & 95\,\%\\
+\bottomrule
+\end{tabularx}}
+
+\vspace{8pt}
+{\small\textbf{Hard limits (both modes, all enforced by code):} at most 3 rounds $\cdot$ at most 3 new
+candidates per refinement $\cdot$ MLP epochs $\le 50$, batch size $\ge 16$ $\cdot$ at most 4 LLM calls
+(Planner, 2 Recommender decisions, 1 explanation) $\cdot$ at most 26 runs (Selection: $8 + 2 \times 3
+\times 3$) or 33 runs (Effect: $(5 + 2 \times 3) \times 3$).
+\textbf{Limitation:} every result is conditional on the one fixed training split.}
+
+\end{document}

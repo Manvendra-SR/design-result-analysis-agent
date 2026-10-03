@@ -19,6 +19,11 @@ export function metricValue(metric: Metric, value: number | null | undefined): s
   return metric === "accuracy" ? pct(value) : num(value, 4);
 }
 
+/** A confidence level: 0.95 -> "95%", 0.975 -> "97.5%". */
+export function confidenceLabel(level: number): string {
+  return `${Number((level * 100).toFixed(1))}%`;
+}
+
 /** A metric difference: accuracy in percentage points, MSE signed. */
 export function metricDelta(metric: Metric, value: number): string {
   const sign = value > 0 ? "+" : "";
@@ -34,12 +39,11 @@ export function formatLevel(level: Level): string {
 /** Compact description of one run's configuration. */
 export function describeConfig(cfg: ExperimentConfiguration): string {
   const norm = cfg.preprocessing.normalize ? " · normalized" : "";
-  if (cfg.model_type === "linear_baseline") return `linear_baseline${norm}`;
   const hp = cfg.hyperparameters ?? {};
   const parts = Object.keys(hp)
     .sort()
     .map((k) => `${k}=${hp[k]}`);
-  return `mlp · ${parts.join(" · ")}${norm}`;
+  return [cfg.model_type, ...parts].join(" · ") + norm;
 }
 
 /**

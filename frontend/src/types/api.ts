@@ -5,9 +5,11 @@
 
 export type TaskType = "classification" | "regression";
 
+export type ModelType = "linear_baseline" | "decision_tree" | "random_forest" | "mlp";
+
 export interface ExperimentConfiguration {
   dataset_id: string;
-  model_type: "mlp" | "linear_baseline";
+  model_type: ModelType;
   hyperparameters: Record<string, number>;
   preprocessing: { normalize: boolean };
   random_seed: number;
@@ -28,55 +30,79 @@ export interface ExperimentResult {
 /** A value of the factor under test. */
 export type Level = boolean | number | string;
 
-export type Factor =
-  | "model_type"
-  | "normalize"
-  | "hidden_size"
-  | "dropout"
-  | "learning_rate"
-  | "batch_size"
-  | "epochs";
+export type PlanMode = "effect" | "selection";
+
+/** One configuration (minus the seed) and what it was derived from. */
+export interface Candidate {
+  id: string;
+  label: string;
+  model_type: ModelType;
+  hyperparameters: Record<string, number>;
+  normalize: boolean;
+  parent: string | null;
+  /** What differs from the parent (effect mode: the factor). */
+  knob: string | null;
+  value: Level | null;
+  round: number;
+}
 
 export interface Plan {
-  factor: Factor;
-  levels: Level[];
-  reference: Level;
+  mode: PlanMode;
+  candidates: Candidate[];
+  /** Id of the reference candidate. */
+  reference: string;
+  /** Effect mode: the one factor varied. */
+  factor: string | null;
   base: {
-    model_type: "mlp" | "linear_baseline";
+    model_type: ModelType;
     hyperparameters: Record<string, number>;
-    normalize: boolean;
-  };
+    normalize: boolean | null;
+  } | null;
   rationale: string;
 }
 
 export interface Decision {
   round: number;
-  action: "explore" | "conclude";
-  new_levels: Level[];
+  action: "refine" | "conclude";
+  parent: string | null;
+  knob: string | null;
+  values: Level[];
+  new_candidates: string[];
   rationale: string;
-  decided_by: "agent" | "budget";
+  decided_by: "agent" | "budget" | "settled";
 }
 
 export type Verdict = "better" | "worse" | "inconclusive";
 export type Metric = "accuracy" | "mse";
 
 export interface ConditionSummary {
-  level: Level;
+  id: string;
   label: string;
+  family: ModelType;
+  parent: string | null;
+  change: string | null;
   is_reference: boolean;
   n_ok: number;
   n_failed: number;
   mean: number | null;
   seed_std: number | null;
+  train_metric: number | null;
+  /** How much better it scores on train than on validation (positive = overfitting). */
+  gap: number | null;
+  contender: boolean;
 }
 
-/** One level vs the reference: metric difference with a 95% bootstrap CI. */
+/** Candidate `a` vs candidate `b`: metric difference with a bootstrap CI. */
 export interface Comparison {
-  level: Level;
+  a: string;
   label: string;
+  b: string;
+  against: string;
+  anchor: "reference" | "leader" | "parent" | "runner_up";
   diff: number;
   ci_low: number;
   ci_high: number;
+  confidence: number;
   verdict: Verdict;
 }
 
@@ -84,24 +110,43 @@ export interface Analysis {
   split: "val" | "test";
   metric: Metric;
   higher_is_better: boolean;
+  mode: PlanMode;
   n_rows: number;
   majority_rate: number | null;
+  leader: string | null;
+  contenders: string[];
   conditions: ConditionSummary[];
   comparisons: Comparison[];
 }
 
+export interface ScoreCI {
+  value: number;
+  ci_low: number;
+  ci_high: number;
+}
+
 export interface Report {
-  challenger: string;
+  mode: PlanMode;
+  winner: string;
+  winner_id: string;
   reference: string;
+  runner_up: string | null;
   metric: Metric;
   higher_is_better: boolean;
-  challenger_score: number;
-  reference_score: number;
-  comparison: Comparison;
+  winner_score: ScoreCI;
+  reference_score: ScoreCI;
+  primary: Comparison;
+  secondary: Comparison | null;
+  /** CI level of each test comparison (Bonferroni over the comparisons). */
+  confidence: number;
+  winner_val_score: number;
+  val_to_test_drop: number;
+  effort: Record<string, number>;
+  candidates_tried: number;
   majority_rate: number | null;
   n_test_rows: number;
   rounds_run: number;
-  stopped_by: "agent" | "budget";
+  stopped_by: "agent" | "budget" | "settled";
   headline: string;
   interpretation: string | null;
 }

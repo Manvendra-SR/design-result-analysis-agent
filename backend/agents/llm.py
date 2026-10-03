@@ -11,6 +11,12 @@ sent back to the model once to fix, then the call fails with ``LLMError``.
 
 Transport retries: timeouts, connection errors and HTTP 429/5xx are retried
 with backoff; a 429 honours Groq's ``Retry-After`` (free-tier token limits).
+
+Token budget: every call is stateless (the caller sends a short, fixed set of
+messages), the reply is capped at ``MAX_COMPLETION_TOKENS``, reasoning models
+(gpt-oss) get an explicit ``reasoning_effort``, and each response's ``usage``
+is logged - reasoning tokens count against the free tier's per-minute and
+per-day limits, so they are worth seeing.
 """
 
 from __future__ import annotations
@@ -37,6 +43,7 @@ T = TypeVar("T")
 Messages = List[Dict[str, str]]
 
 _MAX_WAIT_SECONDS = 30.0
+MAX_COMPLETION_TOKENS = 2048
 
 
 class LLMError(RuntimeError):
@@ -96,17 +103,26 @@ class GroqClient:
             reraise=True,
         )
 
-    def chat_json(self, messages: Messages, schema: Dict[str, Any], temperature: float = 0.2) -> str:
+    def chat_json(
+        self,
+        messages: Messages,
+        schema: Dict[str, Any],
+        temperature: float = 0.2,
+        reasoning_effort: str = "medium",
+    ) -> str:
         """Send ``messages`` and return the reply text, constrained to ``schema``."""
-        payload = {
+        payload: Dict[str, Any] = {
             "model": self.model,
             "messages": messages,
             "temperature": temperature,
+            "max_completion_tokens": MAX_COMPLETION_TOKENS,
             "response_format": {
                 "type": "json_schema",
                 "json_schema": {"name": "agent_output", "strict": True, "schema": schema},
             },
         }
+        if self.model.startswith("openai/gpt-oss"):  # other models reject the parameter
+            payload["reasoning_effort"] = reasoning_effort
         logger.info("LLM call -> model=%s prompt_chars=%d", self.model, sum(len(m["content"]) for m in messages))
         try:
             body = self._retrying(self._post, payload)
@@ -114,6 +130,12 @@ class GroqClient:
             raise LLMError(f"Groq returned HTTP {exc.response.status_code}: {exc.response.text[:500]}") from exc
         except httpx.HTTPError as exc:
             raise LLMError(f"Could not reach Groq: {exc}") from exc
+        usage = body.get("usage") if isinstance(body, dict) else None
+        if isinstance(usage, dict):
+            details = usage.get("completion_tokens_details") or {}
+            logger.info("LLM usage <- prompt=%s completion=%s reasoning=%s total=%s",
+                        usage.get("prompt_tokens"), usage.get("completion_tokens"),
+                        details.get("reasoning_tokens"), usage.get("total_tokens"))
         try:
             content = body["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as exc:
@@ -135,6 +157,7 @@ def request_json(
     build: Callable[[Dict[str, Any]], T],
     temperature: float = 0.2,
     attempts: int = 2,
+    reasoning_effort: str = "medium",
 ) -> T:
     """Chat, parse, and ``build`` the reply; feed a validation error back once.
 
@@ -144,7 +167,7 @@ def request_json(
     convo = list(messages)
     error: Exception | None = None
     for _ in range(attempts):
-        raw = llm.chat_json(convo, schema=schema, temperature=temperature)
+        raw = llm.chat_json(convo, schema=schema, temperature=temperature, reasoning_effort=reasoning_effort)
         try:
             return build(json.loads(raw))
         except ValueError as exc:  # json.JSONDecodeError is a ValueError too

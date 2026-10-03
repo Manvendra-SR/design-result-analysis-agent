@@ -3,13 +3,19 @@ backend/agents/planner.py
 ===========================
 Planner: research question + dataset profile -> ``Plan``.
 
-This is the step that genuinely needs language understanding: deciding which
-factor a free-text question is about, which levels are worth trying, and which
-level is the natural reference. The LLM fills a small schema
-(factor / levels / reference / base configuration); it never writes raw
-configurations or seeds. ``Plan`` validation then enforces the rules in code -
-a real factor, 2-5 distinct levels, values in range - and a reply that breaks
-one is sent back to the model once to fix.
+This is the step that genuinely needs language understanding: deciding what
+kind of question a free-text question is, and turning it into a design.
+
+effect     "Does X help?" - which factor, which levels, which level is the
+           natural reference, and the configuration they share.
+selection  "Which model is best?" - which model families are worth comparing.
+           Code starts each one at its registry defaults (a fair start) and
+           makes the simplest one the reference.
+
+The LLM fills a small schema; it never writes raw configurations or seeds.
+``Plan`` construction then enforces the rules in code - a real factor or
+family, 2-5 distinct levels, values in range - and a reply that breaks one is
+sent back to the model once to fix.
 """
 
 from __future__ import annotations
@@ -18,11 +24,11 @@ from typing import Any, Dict
 
 from backend.agents.llm import request_json
 from backend.models.dataset import DatasetProfile
-from backend.models.experiment import MLP_DEFAULTS
-from backend.models.investigation import BaseSetup, Factor, Level, Plan
+from backend.models.experiment import ALL_KNOBS, FAMILIES
+from backend.models.investigation import FACTORS, FAMILY_ORDER, BaseSetup, Level, Plan
 
 MAX_INITIAL_LEVELS = 5
-FACTORS = list(Factor.__args__)  # type: ignore[attr-defined]
+MAX_CLASSES_SHOWN = 10
 
 
 class PlanningError(Exception):
@@ -47,8 +53,8 @@ def parse_level(factor: str, raw: str) -> Level:
 _HP_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
-    "properties": {k: {"type": ["number", "null"]} for k in MLP_DEFAULTS},
-    "required": list(MLP_DEFAULTS),
+    "properties": {k: {"type": ["number", "null"]} for k in ALL_KNOBS},
+    "required": list(ALL_KNOBS),
 }
 
 PLAN_SCHEMA: Dict[str, Any] = {
@@ -56,47 +62,61 @@ PLAN_SCHEMA: Dict[str, Any] = {
     "additionalProperties": False,
     "properties": {
         "error": {"type": ["string", "null"]},
-        "factor": {"type": "string", "enum": FACTORS},
+        "mode": {"type": "string", "enum": ["effect", "selection"]},
+        "families": {"type": "array", "items": {"type": "string", "enum": FAMILY_ORDER}},
+        "factor": {"type": ["string", "null"], "enum": [*FACTORS, None]},
         "levels": {"type": "array", "items": {"type": "string"}},
-        "reference": {"type": "string"},
+        "reference": {"type": ["string", "null"]},
         "base": {
             "type": "object",
             "additionalProperties": False,
             "properties": {
-                "model_type": {"type": "string", "enum": ["mlp", "linear_baseline"]},
-                "normalize": {"type": "boolean"},
+                "model_type": {"type": "string", "enum": FAMILY_ORDER},
+                "normalize": {"type": ["boolean", "null"]},
                 "hyperparameters": _HP_SCHEMA,
             },
             "required": ["model_type", "normalize", "hyperparameters"],
         },
         "rationale": {"type": "string"},
     },
-    "required": ["error", "factor", "levels", "reference", "base", "rationale"],
+    "required": ["error", "mode", "families", "factor", "levels", "reference", "base", "rationale"],
 }
 
-_SYSTEM_PROMPT = f"""\
-You design a controlled ML experiment that answers a research question about \
-one tabular dataset. You choose ONE factor to vary; everything else is held fixed.
 
-Factors you may vary:
-- "model_type": levels "mlp" and/or "linear_baseline" (logistic/linear regression)
-- "normalize": levels "true"/"false" (StandardScaler fit on the training split)
-- an mlp hyperparameter: "hidden_size" (1-512), "dropout" (0 to <1), \
-"learning_rate" (0-1], "batch_size" (1-4096), "epochs" (1-100)
+def _knob_lines() -> str:
+    return "\n".join(
+        f"- {family}: " + (", ".join(
+            f"{k} ({v.low:g}-{v.high:g})" for k, v in spec.knobs.items()) or "no hyperparameters")
+        for family, spec in FAMILIES.items()
+    )
+
+
+_SYSTEM_PROMPT = f"""\
+You design an ML experiment that answers a research question about one \
+tabular dataset. First decide which kind of question it is:
+
+- "selection": which model is best / should be used. List 2-4 "families" worth \
+comparing. Code starts each at its defaults and makes the simplest the reference. \
+Leave factor/levels/reference empty (null / []).
+- "effect": does ONE thing help or matter (dropout, normalization, depth, one model \
+vs another...). Choose ONE "factor", 2-{MAX_INITIAL_LEVELS} "levels" (as strings) \
+and the "reference" level the others are compared against - usually the default \
+or simplest choice (e.g. dropout "0", normalize "false", "linear_baseline"). \
+Everything else is held fixed in "base"; leave "families" empty.
+
+Model families and their hyperparameters (ranges):
+{_knob_lines()}
+Factors: "model_type" (levels are family names), "normalize" ("true"/"false"), \
+or a hyperparameter of the base family.
 
 Rules:
-1. Pick the single factor the question is about, and 2-{MAX_INITIAL_LEVELS} levels of it, as strings.
-2. "reference" is the level the others are compared against - usually the \
-default or simplest choice (e.g. dropout "0", normalize "false", "linear_baseline").
-3. "base" is the configuration shared by every level. Keep it small and fast \
-(hidden_size <= 128, epochs <= 30). Hyperparameters you do not set may be null \
-(defaults: {MLP_DEFAULTS}). The factor's own value in "base" is ignored.
-4. A hyperparameter factor requires base model_type "mlp".
-5. Seeds and replicates are handled by the system - do not mention them.
+1. Keep "base" small and fast (hidden_size <= 128, epochs <= 30). Hyperparameters \
+you do not set are null and take their defaults. normalize null = the family default.
+2. Seeds and replicates are handled by the system - do not mention them.
 
-If the question cannot be answered by varying one of these factors on this \
-dataset, set "error" to one sentence explaining why (other fields may be empty). \
-Otherwise set "error" to null and explain the design in "rationale" (2-3 sentences)."""
+If the question cannot be answered with these models on this dataset, set "error" \
+to one sentence explaining why (other fields may be empty). Otherwise set "error" \
+to null and explain the design in "rationale" (2-3 sentences)."""
 
 
 class Planner:
@@ -114,12 +134,17 @@ class Planner:
 def _build_plan(reply: Dict[str, Any]) -> Plan:
     if reply.get("error"):
         raise PlanningError(reply["error"])
+    rationale = reply["rationale"].strip()
+    if reply["mode"] == "selection":
+        return Plan.selection(reply["families"], rationale)
     factor = reply["factor"]
+    if not factor or reply["reference"] is None:
+        raise ValueError("an effect plan needs a factor and a reference level")
     levels = [parse_level(factor, v) for v in reply["levels"]]
     if len(levels) > MAX_INITIAL_LEVELS:
         raise ValueError(f"use at most {MAX_INITIAL_LEVELS} levels, got {len(levels)}")
     base = reply["base"]
-    return Plan(
+    return Plan.effect(
         factor=factor,
         levels=levels,
         reference=parse_level(factor, reply["reference"]),
@@ -128,11 +153,12 @@ def _build_plan(reply: Dict[str, Any]) -> Plan:
             normalize=base["normalize"],
             hyperparameters={k: v for k, v in base["hyperparameters"].items() if v is not None},
         ),
-        rationale=reply["rationale"].strip(),
+        rationale=rationale,
     )
 
 
 def describe_dataset(profile: DatasetProfile) -> str:
+    """Counts only - never rows or column names. Bounded: at most MAX_CLASSES_SHOWN classes."""
     lines = [
         "Dataset:",
         f"- task: {profile.task_type}, target column {profile.target_column!r}",
@@ -140,5 +166,8 @@ def describe_dataset(profile: DatasetProfile) -> str:
         f"({len(profile.numeric_columns)} numeric, {len(profile.categorical_columns)} categorical)",
     ]
     if profile.task_type == "classification":
-        lines.append(f"- {profile.n_classes} classes, distribution {profile.class_distribution}")
+        dist = sorted((profile.class_distribution or {}).items(), key=lambda kv: -kv[1])
+        shown = dict(dist[:MAX_CLASSES_SHOWN])
+        more = f" and {len(dist) - MAX_CLASSES_SHOWN} more" if len(dist) > MAX_CLASSES_SHOWN else ""
+        lines.append(f"- {profile.n_classes} classes, distribution {shown}{more}")
     return "\n".join(lines)
